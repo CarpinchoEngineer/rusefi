@@ -44,8 +44,9 @@ if [[ -z "$archive" ]]; then
   if [[ ! -f "$archive" ]]; then
     download="$(mktemp "$cache_dir/$ARCHIVE_NAME.XXXXXX")"
     trap 'rm -f -- "$download"' EXIT
+    # A named output file lets curl discard partial data before retrying this GET.
     curl -fsSL --proto '=https' --tlsv1.2 \
-      --connect-timeout 10 --max-time 60 --retry 5 --retry-delay 2 --retry-max-time 120 \
+      --connect-timeout 10 --max-time 60 --retry 5 --retry-all-errors --retry-max-time 120 \
       "$URL" -o "$download"
     check_hash "$download" || fail "7-Zip $VERSION archive SHA-256 mismatch: $download"
     mv -- "$download" "$archive"

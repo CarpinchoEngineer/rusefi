@@ -96,6 +96,11 @@ def get_archive(manifest, cache_dir, offline_archive):
                         with urllib.request.urlopen(request, timeout=30) as response:
                             with partial.open("wb") as destination:
                                 shutil.copyfileobj(response, destination)
+                                content_length = getattr(response, "headers", {}).get("Content-Length")
+                                if content_length is not None:
+                                    missing = int(content_length) - destination.tell()
+                                    if missing > 0:
+                                        raise http.client.IncompleteRead(b"", missing)
                         break
                     except (urllib.error.URLError, TimeoutError, ConnectionError,
                             socket.gaierror, socket.herror,
@@ -187,7 +192,8 @@ def main():
     args = parser.parse_args()
     try:
         prepare(args.output_dir, args.cache_dir, args.archive, args.manifest)
-    except (OSError, ValueError, KeyError, zipfile.BadZipFile, json.JSONDecodeError) as error:
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile,
+            json.JSONDecodeError, http.client.IncompleteRead) as error:
         print(f"prepare_windows_jre.py: {error}", file=sys.stderr)
         return 1
     return 0

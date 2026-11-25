@@ -233,7 +233,7 @@ class PrepareWindows7zaTest(unittest.TestCase):
             self.assertEqual(b"license fixture\n", (output / "7za-LICENSE.txt").read_bytes())
             self.assertEqual(b"readme fixture\n", (output / "7za-readme.txt").read_bytes())
 
-    def test_truncated_transfer_currently_aborts_download(self):
+    def test_truncated_transfer_is_retried(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             archive_data = b"deterministic archive fixture"
@@ -249,11 +249,10 @@ class PrepareWindows7zaTest(unittest.TestCase):
                 env=env, capture_output=True, text=True, timeout=10,
             )
 
-            # #10714 follow-up: curl's ordinary retry policy excludes partial transfers.
-            self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
-            self.assertEqual(1, server.requests)
-            self.assertEqual([], list(cache.iterdir()))
-            self.assertEqual([], list(output.iterdir()))
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertEqual(2, server.requests)
+            self.assertEqual(archive_data, (cache / "7z2606-extra.7z").read_bytes())
+            self.assertEqual(b"exe fixture\n", (output / "7za.exe").read_bytes())
 
 
 # Replaced by the helper's pinned release URL by the PATH-local curl shim.
