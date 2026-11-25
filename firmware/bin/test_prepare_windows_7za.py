@@ -1,8 +1,6 @@
-"""Characterize 7za download handling for rusEFI issue #10714.
+"""Test 7za download retry and cache handling for rusEFI issue #10714.
 
 Run with: python3 firmware/bin/test_prepare_windows_7za.py
-The current-bad-behavior assertion records that a transient HTTP 503 aborts
-preparation instead of retrying; keep the same server stimulus when fixing it.
 """
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -104,7 +102,7 @@ class PrepareWindows7zaTest(unittest.TestCase):
         env = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ["PATH"])
         return server, env
 
-    def test_corrupt_automatic_cache_fails_without_removing_entry(self):
+    def test_corrupt_automatic_cache_is_replaced(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             archive_data = b"deterministic archive fixture"
@@ -120,12 +118,12 @@ class PrepareWindows7zaTest(unittest.TestCase):
                 env=env, capture_output=True, text=True, timeout=10,
             )
 
-            self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
-            self.assertIn("SHA-256 mismatch", result.stderr)
-            self.assertEqual(0, server.requests, "baseline rejects the cache without redownloading")
-            self.assertEqual(b"corrupt cache entry", cached.read_bytes())
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertGreaterEqual(server.requests, 2)
+            self.assertLessEqual(server.requests, 6)
+            self.assertEqual(archive_data, cached.read_bytes())
             self.assertEqual([cached], list(cache.iterdir()))
-            self.assertEqual([], list(output.iterdir()))
+            self.assertEqual(b"exe fixture\n", (output / "7za.exe").read_bytes())
 
     def test_invalid_explicit_archive_fails_without_modifying_it(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -187,7 +185,7 @@ class PrepareWindows7zaTest(unittest.TestCase):
             self.assertEqual([], list(cache.iterdir()), "bad archive must not enter cache")
             self.assertEqual([], list(output.iterdir()), "bad archive must not be extracted")
 
-    def test_persistent_503_currently_stops_without_retries(self):
+    def test_persistent_503_fails_after_bounded_retries(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             archive_data = b"deterministic archive fixture"
@@ -204,11 +202,12 @@ class PrepareWindows7zaTest(unittest.TestCase):
             )
 
             self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
-            self.assertEqual(1, server.requests, "baseline stops after first 503")
+            self.assertGreater(server.requests, 1)
+            self.assertLessEqual(server.requests, 6)
             self.assertEqual([], list(cache.iterdir()))
             self.assertEqual([], list(output.iterdir()))
 
-    def test_transient_503_currently_aborts_download(self):
+    def test_transient_503_is_retried_and_archive_staged(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             archive_data = b"deterministic archive fixture"
@@ -221,10 +220,13 @@ class PrepareWindows7zaTest(unittest.TestCase):
                 env=env, capture_output=True, text=True, timeout=10,
             )
 
-            self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
-            self.assertEqual(1, server.requests, "baseline makes no retry after HTTP 503")
-            self.assertEqual([], list(output.iterdir()), "no files should be staged")
-            self.assertEqual([], list(cache.iterdir()), "failed download must not enter cache")
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertGreaterEqual(server.requests, 2)
+            self.assertLessEqual(server.requests, 6)
+            self.assertEqual(archive_data, (cache / "7z2606-extra.7z").read_bytes())
+            self.assertEqual(b"exe fixture\n", (output / "7za.exe").read_bytes())
+            self.assertEqual(b"license fixture\n", (output / "7za-LICENSE.txt").read_bytes())
+            self.assertEqual(b"readme fixture\n", (output / "7za-readme.txt").read_bytes())
 
 
 # Replaced by the helper's pinned release URL by the PATH-local curl shim.

@@ -1,8 +1,6 @@
-"""Characterize JRE download handling for rusEFI issue #10714.
+"""Test JRE download retry and cache handling for rusEFI issue #10714.
 
 Run with: python3 firmware/bin/test_prepare_windows_jre.py
-The current-bad-behavior assertion records that a transient HTTP 503 aborts
-preparation; retain this response sequence when adding retry handling.
 """
 
 import hashlib
@@ -40,6 +38,34 @@ def valid_archive():
 
 
 class PrepareWindowsJreTest(unittest.TestCase):
+    def test_retry_classification(self):
+        for error, expected in (
+            (urllib.error.HTTPError("url", 429, "rate limited", {}, None), True),
+            (urllib.error.HTTPError("url", 403, "forbidden", {}, None), False),
+            (urllib.error.URLError(TimeoutError("timeout")), True),
+            (urllib.error.URLError(PermissionError("not a network failure")), False),
+        ):
+            with self.subTest(error=error):
+                try:
+                    self.assertEqual(expected, JRE.retryable_download_error(error))
+                finally:
+                    if isinstance(error, urllib.error.HTTPError):
+                        error.close()
+
+    def test_retry_delay_uses_bounded_backoff_and_retry_after(self):
+        for attempt, retry_after, expected in (
+            (0, None, 1), (1, None, 2), (2, None, 4),
+            (0, "10", 10), (0, "600", 30), (1, "-1", 2),
+            (2, "invalid", 4),
+        ):
+            with self.subTest(attempt=attempt, retry_after=retry_after):
+                headers = {} if retry_after is None else {"Retry-After": retry_after}
+                error = urllib.error.HTTPError("url", 503, "unavailable", headers, None)
+                try:
+                    self.assertEqual(expected, JRE.download_retry_delay(error, attempt))
+                finally:
+                    error.close()
+
     def make_manifest(self, root, data):
         manifest = root / "manifest.json"
         manifest.write_text(json.dumps({
@@ -177,7 +203,7 @@ class PrepareWindowsJreTest(unittest.TestCase):
             self.assertEqual([], list(cache.iterdir()), "failed partial must be removed")
             self.assertFalse(output.exists())
 
-    def test_transient_503_currently_aborts_download(self):
+    def test_transient_503_is_retried_and_archive_staged(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             data = valid_archive()
@@ -201,15 +227,13 @@ class PrepareWindowsJreTest(unittest.TestCase):
             with mock.patch.object(JRE.urllib.request, "urlopen",
                                    side_effect=transient_then_success):
                 with mock.patch("time.sleep"):
-                    with self.assertRaises(urllib.error.HTTPError):
-                        JRE.prepare(output, cache, None, manifest)
+                    JRE.prepare(output, cache, None, manifest)
 
-            self.assertEqual([30], calls, "baseline makes one request")
-            self.assertFalse((cache / "runtime.zip").exists())
-            self.assertEqual([], list(cache.iterdir()), "partial download is removed")
-            self.assertFalse(output.exists(), "failed download must not stage output")
+            self.assertEqual([30, 30], calls)
+            self.assertEqual(data, (cache / "runtime.zip").read_bytes())
+            self.assertTrue((output / "bin/java.exe").is_file())
 
-    def test_interrupted_read_removes_partial_file(self):
+    def test_interrupted_read_is_retried_and_partial_replaced(self):
         class InterruptedResponse(io.BytesIO):
             def __init__(self, data):
                 super().__init__(data)
@@ -238,14 +262,13 @@ class PrepareWindowsJreTest(unittest.TestCase):
             with mock.patch.object(JRE.urllib.request, "urlopen",
                                    side_effect=interrupted_then_valid):
                 with mock.patch("time.sleep"):
-                    with self.assertRaisesRegex(ConnectionResetError, "connection interrupted"):
-                        JRE.prepare(output, cache, None, manifest)
+                    JRE.prepare(output, cache, None, manifest)
 
-            self.assertEqual([30], calls, "baseline does not retry an interrupted read")
-            self.assertEqual([], list(cache.iterdir()), "partial archive must be removed")
-            self.assertFalse(output.exists(), "interrupted download must not stage output")
+            self.assertEqual([30, 30], calls)
+            self.assertEqual(data, (cache / "runtime.zip").read_bytes())
+            self.assertTrue((output / "bin/java.exe").is_file())
 
-    def test_repeated_503s_currently_fail_on_first_attempt(self):
+    def test_repeated_503s_fail_after_bounded_retries(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             data = valid_archive()
@@ -268,7 +291,7 @@ class PrepareWindowsJreTest(unittest.TestCase):
                     with self.assertRaises(urllib.error.HTTPError):
                         JRE.prepare(output, cache, None, manifest)
 
-            self.assertEqual([30], calls, "baseline stops after first 503")
+            self.assertEqual([30] * 4, calls)
             self.assertEqual([], list(cache.iterdir()))
             self.assertFalse(output.exists())
 
