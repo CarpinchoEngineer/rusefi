@@ -295,6 +295,35 @@ class PrepareWindowsJreTest(unittest.TestCase):
             self.assertEqual([], list(cache.iterdir()))
             self.assertFalse(output.exists())
 
+    def test_premature_eof_currently_fails_checksum_without_retry(self):
+        class PrematureEOF(io.BytesIO):
+            def __init__(self, data):
+                super().__init__(data[:-1])
+                self.headers = {"Content-Length": str(len(data))}
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data = valid_archive()
+            manifest = self.make_manifest(root, data)
+            cache = root / "cache"
+            output = root / "runtime-out"
+            calls = []
+
+            def truncated_then_valid(_request, timeout):
+                calls.append(timeout)
+                return PrematureEOF(data) if len(calls) == 1 else io.BytesIO(data)
+
+            with mock.patch.object(JRE.urllib.request, "urlopen",
+                                   side_effect=truncated_then_valid):
+                with mock.patch("time.sleep"):
+                    # #10714 follow-up: sized reads can silently end early.
+                    with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
+                        JRE.prepare(output, cache, None, manifest)
+
+            self.assertEqual([30], calls)
+            self.assertEqual([], list(cache.iterdir()))
+            self.assertFalse(output.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

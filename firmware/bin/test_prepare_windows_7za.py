@@ -36,6 +36,11 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         self.send_response(200)
+        if getattr(self.server, "truncate_once", False) and self.server.requests == 1:
+            self.send_header("Content-Length", str(len(self.server.archive)))
+            self.end_headers()
+            self.wfile.write(self.server.archive[:-1])
+            return
         self.end_headers()
         self.wfile.write(self.server.archive)
 
@@ -227,6 +232,28 @@ class PrepareWindows7zaTest(unittest.TestCase):
             self.assertEqual(b"exe fixture\n", (output / "7za.exe").read_bytes())
             self.assertEqual(b"license fixture\n", (output / "7za-LICENSE.txt").read_bytes())
             self.assertEqual(b"readme fixture\n", (output / "7za-readme.txt").read_bytes())
+
+    def test_truncated_transfer_currently_aborts_download(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            archive_data = b"deterministic archive fixture"
+            server, env = self.make_download_fixture(
+                root, archive_data, transient_failure=False,
+            )
+            server.truncate_once = True
+            output = root / "console"
+            cache = root / "cache"
+            output.mkdir()
+            result = subprocess.run(
+                ["bash", str(SCRIPT), str(output), "--cache-dir", str(cache)],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+
+            # #10714 follow-up: curl's ordinary retry policy excludes partial transfers.
+            self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertEqual(1, server.requests)
+            self.assertEqual([], list(cache.iterdir()))
+            self.assertEqual([], list(output.iterdir()))
 
 
 # Replaced by the helper's pinned release URL by the PATH-local curl shim.
