@@ -33,11 +33,11 @@ jobs:
         chibios: 'false'
 
     - name: Discover cores
-      if: ${{ matrix.os != 'macos-latest' }}
+      if: ${{ matrix.os != 'blacksmith-6vcpu-macos-15' }}
       run: lscpu | egrep 'Model name|Socket|Thread|NUMA|CPU\(s\)'
 
     - name: Install required software (ubuntu)
-      if: ${{ matrix.os != 'macos-latest' }}
+      if: ${{ matrix.os != 'blacksmith-6vcpu-macos-15' }}
       run: |
         sudo bash misc/actions/add-ubuntu-latest-apt-mirrors.sh
         sudo bash misc/actions/ubuntu-install-tools.sh
@@ -45,7 +45,7 @@ jobs:
         bash misc/actions/install-valgrind.sh
 
     - name: Install required software (macos)
-      if: ${{ matrix.os == 'macos-latest' }}
+      if: ${{ matrix.os == 'blacksmith-6vcpu-macos-15' }}
       run: |
         brew install mtools zip dosfstools flock coreutils
 
@@ -100,12 +100,12 @@ jobs:
         fi
 
     - name: Generate Code Coverage
-      if: ${{ matrix.os != 'macos-latest' }}
+      if: ${{ matrix.os != 'blacksmith-6vcpu-macos-15' }}
       working-directory: ./unit_tests/
       run: ./ci_gcov.sh
 
     - name: Report code coverage
-      if: ${{ matrix.os != 'macos-latest' }}
+      if: ${{ matrix.os != 'blacksmith-6vcpu-macos-15' }}
       uses: ./.github/actions/unit-test-coverage-report
       with:
         coverage_xml_path: unit_tests/gcov_working_area/gcov/coverage.xml
@@ -116,7 +116,7 @@ jobs:
         post_pr_comment: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false }}
 
     - name: upload test coverage to remote server
-      if: ${{ matrix.os != 'macos-latest' && github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+      if: ${{ matrix.os != 'blacksmith-6vcpu-macos-15' && github.event_name == 'push' && github.ref == 'refs/heads/master' }}
       working-directory: ./unit_tests
       run: ./upload_coverage.sh
 
@@ -127,13 +127,13 @@ jobs:
 
     - name: Rebuild Tests For Valgrind
       # Valgrind isn't compatible with address sanitizer, so we have to rebuild the code
-      if: ${{ matrix.os != 'macos-latest' }}
+      if: ${{ matrix.os != 'blacksmith-6vcpu-macos-15' }}
       working-directory: ./unit_tests/
       run: |
         make clean
         ./make_for_valgrind.sh
 
     - name: Run Tests (Valgrind)
-      if: ${{ matrix.os != 'macos-latest' }}
+      if: ${{ matrix.os != 'blacksmith-6vcpu-macos-15' }}
       working-directory: ./unit_tests/
       run: ./run_with_valgrind.sh
