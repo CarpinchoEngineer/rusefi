@@ -27,6 +27,11 @@ jobs:
       - name: Set up Cygwin
         uses: cygwin/cygwin-install-action@v7
 
+      - name: Disable Cygwin POSIX ACLs
+        # Blacksmith Windows runners: files created by Cygwin tools (e.g. the PCH copy) otherwise
+        # get ACLs that native Windows compilers cannot read ("pch.h: Permission denied")
+        run: Set-Content -Path C:\cygwin\etc\fstab -Value 'none /cygdrive cygdrive binary,noacl,posix=0,user 0 0'
+
       - name: Print bash version
         run: bash --version
 
