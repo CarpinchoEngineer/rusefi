@@ -1,24 +1,27 @@
-name: Unit Tests
+name: Full Linux UT replay benchmark
 
 on:
-  push:
-  pull_request:
   workflow_dispatch:
 
 jobs:
   build:
+    name: Full Linux UT (${{ matrix.arm }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     permissions:
       # A permissions block resets every unlisted scope to none. contents: read is
       # required for checkout on a private repository; actions: read lets the coverage
       # report download the baseline artifact from an earlier run.
       contents: read
       actions: read
-      pull-requests: write
+      pull-requests: read
 
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os:
+          - ${{ github.repository == 'CarpinchoEngineer/rusefi' && 'blacksmith-4vcpu-ubuntu-2604' || 'ubuntu-latest' }}
+        arm: ${{ fromJSON(github.repository == 'CarpinchoEngineer/rusefi' && '["baseline","kawasaki","followup"]' || '["baseline","kawasaki"]') }}
 
     steps:
     - uses: actions/checkout@v7
@@ -29,7 +32,6 @@ jobs:
       # [tag:submodule_auth] see .github/actions/submodule-init/action.yml
       uses: ./.github/actions/submodule-init
       with:
-        token: ${{ secrets.MY_REPO_PAT }}
         chibios: 'false'
 
     - name: Discover cores
@@ -87,21 +89,11 @@ jobs:
       working-directory: ./unit_tests/
       run: ASAN_OPTIONS=detect_stack_use_after_return=1 build/rusefi_test
 
-    - name: Set FTP variables
-      env:
-        ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true'
-        # ref names may contain shell metacharacters - never interpolate them into scripts with ${{ }}
-        GH_REF: ${{ github.ref }}
-      run: |
-        if [ "$GH_REF" = "refs/heads/master" ]; then
-          echo "RUSEFI_SSH_SERVER=${{secrets.RUSEFI_SSH_SERVER}}" >> $GITHUB_ENV
-          echo "RUSEFI_SSH_USER=${{secrets.RUSEFI_SSH_USER}}" >> $GITHUB_ENV
-          echo "RUSEFI_SSH_PASS=${{secrets.RUSEFI_SSH_PASS}}" >> $GITHUB_ENV
-        fi
-
     - name: Generate Code Coverage
       if: ${{ matrix.os != 'macos-latest' }}
       working-directory: ./unit_tests/
+      env:
+        SINGLE_PASS_GCOVR: ${{ matrix.arm == 'followup' && 'yes' || 'no' }}
       run: ./ci_gcov.sh
 
     - name: Report code coverage
@@ -111,7 +103,7 @@ jobs:
         coverage_xml_path: unit_tests/gcov_working_area/gcov/coverage.xml
         artifact_upload_path: ./unit_tests/gcov_working_area/gcov
         baseline_workflow_file: build-unit-tests.yaml
-        artifact_name: rusefi_code_coverage.txt
+        artifact_name: coverage-${{ matrix.arm }}
         is_pull_request: ${{ github.event_name == 'pull_request' }}
         post_pr_comment: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false }}
 
@@ -136,4 +128,16 @@ jobs:
     - name: Run Tests (Valgrind)
       if: ${{ matrix.os != 'macos-latest' }}
       working-directory: ./unit_tests/
-      run: ./run_with_valgrind.sh
+      env:
+        MEMCHECK_REPLAY_ARM: ${{ matrix.arm }}
+      run: |
+        # The ASan pass writes these same names. Start the Memcheck count fresh.
+        rm -f test_results/unittest_realKawasaki8minus1_*.{msl,csv}
+        ./run_with_valgrind.sh
+        shopt -s nullglob
+        for ext in msl csv; do
+          files=(test_results/unittest_realKawasaki8minus1_*."$ext")
+          expected=0
+          if [[ "$MEMCHECK_REPLAY_ARM" == baseline ]]; then expected=12; fi
+          [[ ${#files[@]} == "$expected" ]]
+        done

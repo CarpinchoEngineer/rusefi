@@ -53,6 +53,9 @@ GCOVR_COMMON_OPTS="--exclude-throw-branches --exclude-unreachable-branches --dec
 # The '..' search path explicitly tells gcovr to look for .gcda files in the parent
 # directory (unit_tests/), where build/obj/*.gcda files reside. Without this, gcovr
 # defaults to searching '.' (gcov_working_area/) which is empty.
+if [[ ${SINGLE_PASS_GCOVR:-no} == yes ]]; then
+  exec gcovr $GCOVR_COMMON_OPTS --html-nested gcov/index.html --cobertura-pretty --cobertura gcov/coverage.xml ..
+fi
 gcovr $GCOVR_COMMON_OPTS --html-nested --output gcov/index.html ..
 
 # Generate Cobertura XML for GitHub Action coverage summary processing.

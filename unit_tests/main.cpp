@@ -107,7 +107,12 @@ class LogDisablerForHeavyTests : public ::testing::EmptyTestEventListener {
 	std::unique_ptr<ScopedUnitTestCreateLogs> disabler;
 	void OnTestStart(const ::testing::TestInfo& test_info) override {
 		std::string fullName = std::string(test_info.test_suite_name()) + "." + test_info.name();
-		if (getLogDisabledTests().count(fullName) > 0) {
+		const char* arm = getenv("MEMCHECK_REPLAY_ARM");
+		bool kawasaki = arm && strcmp(arm, "baseline") != 0 && strcmp(test_info.test_suite_name(), "realKawasaki8minus1") == 0;
+		bool extra = arm && strcmp(arm, "followup") == 0 &&
+			(strcmp(test_info.test_suite_name(), "realNissanMaxima") == 0 ||
+			 fullName == "realSuzukiK6A.crankingWithoutSparkPlugs" || fullName == "realSuzukiK6A.crankingWithSparkPlugs");
+		if (kawasaki || extra || getLogDisabledTests().count(fullName) > 0) {
 			disabler = std::make_unique<ScopedUnitTestCreateLogs>(false);
 		}
 	}
