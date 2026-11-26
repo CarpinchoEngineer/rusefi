@@ -1,139 +1,322 @@
-name: Unit Tests
-
-on:
-  push:
-  pull_request:
-  workflow_dispatch:
-
+name: Linux UT compiler cache experiment
+'on': workflow_dispatch
+permissions:
+  contents: read
+  actions: read
 jobs:
-  build:
-    runs-on: ${{ matrix.os }}
-    permissions:
-      # A permissions block resets every unlisted scope to none. contents: read is
-      # required for checkout on a private repository; actions: read lets the coverage
-      # report download the baseline artifact from an earlier run.
-      contents: read
-      actions: read
-      pull-requests: write
-
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-
+  control:
+    name: control
+    runs-on: ${{ github.repository == 'CarpinchoEngineer/rusefi' && 'blacksmith-4vcpu-ubuntu-2604' || 'ubuntu-latest' }}
+    timeout-minutes: 50
     steps:
     - uses: actions/checkout@v7
-
     - uses: ./.github/actions/setup-java
-
     - name: Checkout Submodules Without ChibiOS
-      # [tag:submodule_auth] see .github/actions/submodule-init/action.yml
       uses: ./.github/actions/submodule-init
       with:
-        token: ${{ secrets.MY_REPO_PAT }}
         chibios: 'false'
-
     - name: Discover cores
-      if: ${{ matrix.os != 'macos-latest' }}
       run: lscpu | egrep 'Model name|Socket|Thread|NUMA|CPU\(s\)'
-
     - name: Install required software (ubuntu)
-      if: ${{ matrix.os != 'macos-latest' }}
-      run: |
-        sudo bash misc/actions/add-ubuntu-latest-apt-mirrors.sh
+      run: 'sudo bash misc/actions/add-ubuntu-latest-apt-mirrors.sh
+
         sudo bash misc/actions/ubuntu-install-tools.sh
+
         bash misc/actions/install-gcovr.sh
+
         bash misc/actions/install-valgrind.sh
 
-    - name: Install required software (macos)
-      if: ${{ matrix.os == 'macos-latest' }}
-      run: |
-        brew install mtools zip dosfstools flock coreutils
-
+        '
     - name: Print bash version
       run: bash --version
-
     - name: Test Java Compiler
       run: javac -version
-
     - name: Print Compiler version
-      # NOTE: on mac, this is actually symlink'd to clang, not gcc, but that's ok - we want to build on both
       run: gcc -v
-
     - name: Test STM32 flash and OpenBLT drivers
       run: python3 unit_tests/stm32_flash/test_flash.py
-
     - name: Handle docs-enums separately just to make github logs more readable
       working-directory: ./unit_tests/
       run: make -j4 docs-enums
-
     - name: Handle configs separately just to make github logs more readable
       working-directory: ./unit_tests/
       run: make -j4 config
-
     - name: Build Tests
       working-directory: ./unit_tests/
-      run: |
-        TIMEFORMAT=%R
+      run: 'TIMEFORMAT=%R
+
         time make -j4 COVERAGE=yes
 
-      # This is expected to fail if run after UTC midnight and the last step was run before UTC midnight
+        '
     - name: Build Tests again to assert incremental
       working-directory: ./unit_tests/
-      run: |
-        TIMEFORMAT=%R
+      run: 'TIMEFORMAT=%R
+
         timeout 30s make -j4 COVERAGE=yes
 
+        '
     - name: Run Tests
       working-directory: ./unit_tests/
       run: ASAN_OPTIONS=detect_stack_use_after_return=1 build/rusefi_test
-
-    - name: Set FTP variables
-      env:
-        ACTIONS_ALLOW_UNSECURE_COMMANDS: 'true'
-        # ref names may contain shell metacharacters - never interpolate them into scripts with ${{ }}
-        GH_REF: ${{ github.ref }}
-      run: |
-        if [ "$GH_REF" = "refs/heads/master" ]; then
-          echo "RUSEFI_SSH_SERVER=${{secrets.RUSEFI_SSH_SERVER}}" >> $GITHUB_ENV
-          echo "RUSEFI_SSH_USER=${{secrets.RUSEFI_SSH_USER}}" >> $GITHUB_ENV
-          echo "RUSEFI_SSH_PASS=${{secrets.RUSEFI_SSH_PASS}}" >> $GITHUB_ENV
-        fi
-
     - name: Generate Code Coverage
-      if: ${{ matrix.os != 'macos-latest' }}
       working-directory: ./unit_tests/
       run: ./ci_gcov.sh
-
     - name: Report code coverage
-      if: ${{ matrix.os != 'macos-latest' }}
       uses: ./.github/actions/unit-test-coverage-report
       with:
         coverage_xml_path: unit_tests/gcov_working_area/gcov/coverage.xml
         artifact_upload_path: ./unit_tests/gcov_working_area/gcov
         baseline_workflow_file: build-unit-tests.yaml
-        artifact_name: rusefi_code_coverage.txt
-        is_pull_request: ${{ github.event_name == 'pull_request' }}
-        post_pr_comment: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false }}
-
-    - name: upload test coverage to remote server
-      if: ${{ matrix.os != 'macos-latest' && github.event_name == 'push' && github.ref == 'refs/heads/master' }}
-      working-directory: ./unit_tests
-      run: ./upload_coverage.sh
-
-
-#   - name: Run Tests (sharded)
-#      working-directory: ./unit_tests/
-#      run: bash ./run_sharded_tests.sh
-
+        artifact_name: coverage-control
+        is_pull_request: 'false'
+        post_pr_comment: 'false'
     - name: Rebuild Tests For Valgrind
-      # Valgrind isn't compatible with address sanitizer, so we have to rebuild the code
-      if: ${{ matrix.os != 'macos-latest' }}
       working-directory: ./unit_tests/
-      run: |
-        make clean
+      run: 'make clean
+
         ./make_for_valgrind.sh
 
+        '
     - name: Run Tests (Valgrind)
-      if: ${{ matrix.os != 'macos-latest' }}
       working-directory: ./unit_tests/
+      env:
+        RUSEFI_SKIP_REPLAY_LOGS: '1'
       run: ./run_with_valgrind.sh
+  cold:
+    name: cold
+    runs-on: ${{ github.repository == 'CarpinchoEngineer/rusefi' && 'blacksmith-4vcpu-ubuntu-2604' || 'ubuntu-latest' }}
+    timeout-minutes: 50
+    steps:
+    - uses: actions/checkout@v7
+    - uses: ./.github/actions/setup-java
+    - name: Checkout Submodules Without ChibiOS
+      uses: ./.github/actions/submodule-init
+      with:
+        chibios: 'false'
+    - name: Discover cores
+      run: lscpu | egrep 'Model name|Socket|Thread|NUMA|CPU\(s\)'
+    - name: Install required software (ubuntu)
+      run: 'sudo bash misc/actions/add-ubuntu-latest-apt-mirrors.sh
+
+        sudo bash misc/actions/ubuntu-install-tools.sh
+
+        bash misc/actions/install-gcovr.sh
+
+        bash misc/actions/install-valgrind.sh
+
+
+        sudo apt-get install -y ccache
+
+        ccache --version
+
+        echo /usr/lib/ccache >> "$GITHUB_PATH"
+
+        '
+    - name: Print bash version
+      run: bash --version
+    - name: Test Java Compiler
+      run: javac -version
+    - name: Print Compiler version
+      run: gcc -v
+    - name: Test STM32 flash and OpenBLT drivers
+      run: python3 unit_tests/stm32_flash/test_flash.py
+    - name: Select coverage cache
+      run: 'root="$HOME/.cache/rusefi-ut-bench"
+
+        mkdir -p "$root/coverage" "$root/memcheck"
+
+        echo "CCACHE_DIR=$root/coverage" >> "$GITHUB_ENV"
+
+        echo "CCACHE_MAXSIZE=1G" >> "$GITHUB_ENV"
+
+        echo "CCACHE_COMPILERCHECK=content" >> "$GITHUB_ENV"
+
+        command -v gcc | grep -Fx /usr/lib/ccache/gcc
+
+        command -v g++ | grep -Fx /usr/lib/ccache/g++
+
+        CCACHE_DIR="$root/coverage" ccache -z
+
+        CCACHE_DIR="$root/memcheck" ccache -z'
+    - name: Handle docs-enums separately just to make github logs more readable
+      working-directory: ./unit_tests/
+      run: make -j4 docs-enums
+    - name: Handle configs separately just to make github logs more readable
+      working-directory: ./unit_tests/
+      run: make -j4 config
+    - name: Build Tests
+      working-directory: ./unit_tests/
+      run: 'TIMEFORMAT=%R
+
+        time make -j4 COVERAGE=yes
+
+        '
+    - name: Build Tests again to assert incremental
+      working-directory: ./unit_tests/
+      run: 'TIMEFORMAT=%R
+
+        timeout 30s make -j4 COVERAGE=yes
+
+        '
+    - name: Run Tests
+      working-directory: ./unit_tests/
+      run: ASAN_OPTIONS=detect_stack_use_after_return=1 build/rusefi_test
+    - name: Generate Code Coverage
+      working-directory: ./unit_tests/
+      run: ./ci_gcov.sh
+    - name: Report code coverage
+      uses: ./.github/actions/unit-test-coverage-report
+      with:
+        coverage_xml_path: unit_tests/gcov_working_area/gcov/coverage.xml
+        artifact_upload_path: ./unit_tests/gcov_working_area/gcov
+        baseline_workflow_file: build-unit-tests.yaml
+        artifact_name: coverage-cold
+        is_pull_request: 'false'
+        post_pr_comment: 'false'
+    - name: Coverage cache statistics
+      run: 'ccache -s -v
+
+        du -sh "$CCACHE_DIR"
+
+        echo "CCACHE_DIR=$HOME/.cache/rusefi-ut-bench/memcheck" >> "$GITHUB_ENV"'
+    - name: Rebuild Tests For Valgrind
+      working-directory: ./unit_tests/
+      run: 'make clean
+
+        ./make_for_valgrind.sh
+
+        '
+    - name: Run Tests (Valgrind)
+      working-directory: ./unit_tests/
+      env:
+        RUSEFI_SKIP_REPLAY_LOGS: '1'
+      run: ./run_with_valgrind.sh
+    - name: Memcheck cache statistics
+      run: 'ccache -s -v
+
+        du -sh "$CCACHE_DIR"'
+    - name: Save compiler caches
+      uses: actions/cache/save@v4
+      with:
+        path: ~/.cache/rusefi-ut-bench
+        key: ut-ccache-${{ github.run_id }}-${{ github.run_attempt }}
+  warm:
+    name: warm
+    runs-on: ${{ github.repository == 'CarpinchoEngineer/rusefi' && 'blacksmith-4vcpu-ubuntu-2604' || 'ubuntu-latest' }}
+    timeout-minutes: 50
+    steps:
+    - uses: actions/checkout@v7
+    - uses: ./.github/actions/setup-java
+    - name: Checkout Submodules Without ChibiOS
+      uses: ./.github/actions/submodule-init
+      with:
+        chibios: 'false'
+    - name: Discover cores
+      run: lscpu | egrep 'Model name|Socket|Thread|NUMA|CPU\(s\)'
+    - name: Install required software (ubuntu)
+      run: 'sudo bash misc/actions/add-ubuntu-latest-apt-mirrors.sh
+
+        sudo bash misc/actions/ubuntu-install-tools.sh
+
+        bash misc/actions/install-gcovr.sh
+
+        bash misc/actions/install-valgrind.sh
+
+
+        sudo apt-get install -y ccache
+
+        ccache --version
+
+        echo /usr/lib/ccache >> "$GITHUB_PATH"
+
+        '
+    - name: Print bash version
+      run: bash --version
+    - name: Test Java Compiler
+      run: javac -version
+    - name: Print Compiler version
+      run: gcc -v
+    - name: Test STM32 flash and OpenBLT drivers
+      run: python3 unit_tests/stm32_flash/test_flash.py
+    - name: Restore compiler caches
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/.cache/rusefi-ut-bench
+        key: ut-ccache-${{ github.run_id }}-${{ github.run_attempt }}
+        fail-on-cache-miss: 'true'
+    - name: Select coverage cache
+      run: 'root="$HOME/.cache/rusefi-ut-bench"
+
+        mkdir -p "$root/coverage" "$root/memcheck"
+
+        echo "CCACHE_DIR=$root/coverage" >> "$GITHUB_ENV"
+
+        echo "CCACHE_MAXSIZE=1G" >> "$GITHUB_ENV"
+
+        echo "CCACHE_COMPILERCHECK=content" >> "$GITHUB_ENV"
+
+        command -v gcc | grep -Fx /usr/lib/ccache/gcc
+
+        command -v g++ | grep -Fx /usr/lib/ccache/g++
+
+        CCACHE_DIR="$root/coverage" ccache -z
+
+        CCACHE_DIR="$root/memcheck" ccache -z'
+    - name: Handle docs-enums separately just to make github logs more readable
+      working-directory: ./unit_tests/
+      run: make -j4 docs-enums
+    - name: Handle configs separately just to make github logs more readable
+      working-directory: ./unit_tests/
+      run: make -j4 config
+    - name: Build Tests
+      working-directory: ./unit_tests/
+      run: 'TIMEFORMAT=%R
+
+        time make -j4 COVERAGE=yes
+
+        '
+    - name: Build Tests again to assert incremental
+      working-directory: ./unit_tests/
+      run: 'TIMEFORMAT=%R
+
+        timeout 30s make -j4 COVERAGE=yes
+
+        '
+    - name: Run Tests
+      working-directory: ./unit_tests/
+      run: ASAN_OPTIONS=detect_stack_use_after_return=1 build/rusefi_test
+    - name: Generate Code Coverage
+      working-directory: ./unit_tests/
+      run: ./ci_gcov.sh
+    - name: Report code coverage
+      uses: ./.github/actions/unit-test-coverage-report
+      with:
+        coverage_xml_path: unit_tests/gcov_working_area/gcov/coverage.xml
+        artifact_upload_path: ./unit_tests/gcov_working_area/gcov
+        baseline_workflow_file: build-unit-tests.yaml
+        artifact_name: coverage-warm
+        is_pull_request: 'false'
+        post_pr_comment: 'false'
+    - name: Coverage cache statistics
+      run: 'ccache -s -v
+
+        du -sh "$CCACHE_DIR"
+
+        echo "CCACHE_DIR=$HOME/.cache/rusefi-ut-bench/memcheck" >> "$GITHUB_ENV"'
+    - name: Rebuild Tests For Valgrind
+      working-directory: ./unit_tests/
+      run: 'make clean
+
+        ./make_for_valgrind.sh
+
+        '
+    - name: Run Tests (Valgrind)
+      working-directory: ./unit_tests/
+      env:
+        RUSEFI_SKIP_REPLAY_LOGS: '1'
+      run: ./run_with_valgrind.sh
+    - name: Memcheck cache statistics
+      run: 'ccache -s -v
+
+        du -sh "$CCACHE_DIR"'
+    needs: cold
