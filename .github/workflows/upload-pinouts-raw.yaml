@@ -28,10 +28,10 @@ env:
 
 jobs:
   upload:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2604
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: useblacksmith/checkout@v1
 
       - uses: ./.github/actions/setup-java
 

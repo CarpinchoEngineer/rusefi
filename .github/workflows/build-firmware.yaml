@@ -31,11 +31,11 @@ on:
         type: boolean
 jobs:
   build-libopenblt-linux:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2604
 
     steps:
 # we are not using 'recursive' here, we have common_submodule_init.sh instead probably as a performance optimization?
-      - uses: actions/checkout@v7
+      - uses: useblacksmith/checkout@v1
         with:
           # [tag:submodule_auth] checkout's own submodule fetch authenticates with this token; checkout rejects an empty token, hence the fallback
           token: ${{ secrets.MY_REPO_PAT || github.token }}
@@ -72,7 +72,7 @@ jobs:
 #          ./deliver/libopenblt_jni.so
 
   release:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2604
     steps:
 
     - name: Dump GitHub context
@@ -144,7 +144,7 @@ jobs:
 #          ./deliver/libopenblt_jni.dylib
 
   generate-matrix:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2604
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
@@ -163,7 +163,7 @@ jobs:
         echo "matrix=$(bash bin/generate_matrix.sh config/boards)" >> $GITHUB_OUTPUT
 
   build-firmware:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2604
     needs: [
              # todo proper build of build-libopenblt #5866
       #build-libopenblt-linux,
@@ -396,7 +396,7 @@ jobs:
         path: ./artifacts/rusefi_bundle_${{matrix.build-target}}_autoupdate.zip
 
   build-universal-bundle:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2604
     steps:
     - uses: actions/checkout@v7
 

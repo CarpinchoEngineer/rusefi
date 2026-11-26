@@ -19,14 +19,14 @@ on:
 
 jobs:
   update-git:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2604
     timeout-minutes: 10
     concurrency:
       group: reference-update-${{ github.repository }}-${{ github.ref }}
       cancel-in-progress: false
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: useblacksmith/checkout@v1
 
       # [tag:submodule_auth] see .github/actions/submodule-init/action.yml; checkout's token covers the
       # superproject only, so both steps that touch ext/rusefi carry the credentials themselves
