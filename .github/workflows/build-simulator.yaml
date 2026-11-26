@@ -11,7 +11,7 @@ env:
 jobs:
   # This is just to ensure the simulator compiles on Linux
   build-simulator:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2604
 
     strategy:
       matrix:
@@ -29,7 +29,7 @@ jobs:
 
     - name: Install Clang
       if: ${{ matrix.use-clang == 'yes' }}
-      run: sudo apt-get install -y clang
+      run: sudo apt-get update && sudo apt-get install -y clang
 
     - name: Print compiler version
       working-directory: .

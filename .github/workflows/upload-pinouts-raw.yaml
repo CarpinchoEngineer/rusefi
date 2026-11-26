@@ -28,15 +28,15 @@ env:
 
 jobs:
   upload:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2604
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: useblacksmith/checkout@v1
 
       - uses: ./.github/actions/setup-java
 
       - name: Install sshpass
-        run: sudo apt-get install -y sshpass
+        run: sudo apt-get update && sudo apt-get install -y sshpass
 
       - name: Build packager jar
         run: ./gradlew :config_definition:shadowJar

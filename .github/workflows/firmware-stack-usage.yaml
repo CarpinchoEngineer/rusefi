@@ -64,7 +64,7 @@ on:
 
 jobs:
   stack-usage:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2604
     permissions:
       contents: read
     strategy:
@@ -143,7 +143,7 @@ jobs:
   update-reference:
     needs: stack-usage
     if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/master' }}
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2604
     permissions:
       actions: read
       contents: write
