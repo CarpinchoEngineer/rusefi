@@ -1117,3 +1117,5 @@ console live data tab is broken #8402
         }
     }
 }
+
+// Matrix-only sandbox trigger probe.
