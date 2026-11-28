@@ -13,11 +13,14 @@ if [[ "$EVENT_NAME" == pull_request ]]; then
 		&& -n "$PR_BASE_SHA" && -n "$PR_HEAD_SHA" \
 		&& "${parent_list[1]}" == "$PR_BASE_SHA" \
 		&& "${parent_list[2]}" == "$PR_HEAD_SHA" ]]; then
+		# pull_request events have no head_commit.message; both parents are fetched.
+		COMMIT_MESSAGE=$(git -C "$FDIR/.." log -1 --format=%B "$PR_HEAD_SHA")
 		git -C "$FDIR/.." diff --quiet --no-renames "${parent_list[1]}" HEAD -- .
 		diff_status=$?
 		if [[ $diff_status -eq 1 ]] && git -C "$FDIR/.." diff --quiet --no-renames \
 			"${parent_list[1]}" HEAD -- . \
 			':(top,exclude,glob)java_console/ui/src/**/*.java' \
+			':(top,exclude)java_tools/version/src/main/java/com/rusefi/UiVersion.java' \
 			':(top,exclude,glob)java_console/inifile/src/**/*.java' \
 			':(top,exclude)java_console/ui/src/main/resources' \
 			':(top,exclude,glob)java_console/*/src/test/**' \
@@ -33,6 +36,11 @@ if [[ "$EVENT_NAME" == pull_request ]]; then
 	fi
 fi
 
+ONLY=
+if [[ "$COMMIT_MESSAGE" =~ only:([^[:space:]]+) ]]; then
+	ONLY=${BASH_REMATCH[1]}
+fi
+
 getTarget ()
 {
 	source "${2}/config/boards/common_script_read_meta_env.inc" "$1" >/dev/null
@@ -41,14 +49,14 @@ getTarget ()
 		return
 	fi
 	SKIP_RATE=${SKIP_RATE:-0}
-	ONLY=$(echo "$COMMIT_MESSAGE" | grep -Po '(?<=only:)[^\s]*')
-	if [[ ( "$EVENT_NAME" == 'workflow_dispatch' \
+	if [[ "$ONLY" == "$BUNDLE_NAME" \
+			|| ( -z "$ONLY" && ( \
+				( "$EVENT_NAME" == 'workflow_dispatch' \
 						|| "$EVENT_NAME" == 'schedule' \
 						|| "$EVENT_NAME" == 'pull_request' \
 						|| "$RUN_ATTEMPT" -gt 1 ) \
 					&& "SKIP_RATE" -lt 100 \
-					|| ( $((RANDOM % 100)) -ge "$SKIP_RATE" && -z "$ONLY" ) \
-					|| "$ONLY" == "$BUNDLE_NAME" ]]; then
+					|| $((RANDOM % 100)) -ge "$SKIP_RATE" ) ) ]]; then
 		printf '%s\n' "$BUNDLE_NAME"
 	fi
 }
