@@ -84,6 +84,8 @@ public class CalibrationDialogWidget {
     private boolean hasReadoutDemand;
     private static final int READOUT_GAUGE_SIZE = 90;
     private static final int MIN_GAUGE_SIZE = 60;
+    /** Gauges wrap into more rows, e.g. four into 2x2, rather than sit in a row smaller than this. */
+    private static final int LARGEST_GAUGE_SIZE = 180;
     /** Counts gauge groups so renderPanelEntry can mark panels that contain gauges as growing. */
     private int gaugeGroupsRendered;
     /** Called after each user edit with the current working image, so listeners can re-evaluate their own expressions. */
@@ -252,8 +254,12 @@ public class CalibrationDialogWidget {
     }
 
     private void readFromEcuPage(int pageIndex, int offset, int size, Consumer<byte[]> onResult) {
+        if (uiContext.isOfflineMode()) {
+            onResult.accept(null);
+            return;
+        }
         BinaryProtocol bp = uiContext.getBinaryProtocol();
-        if (bp == null) {
+        if (bp == null || uiContext.isOfflineMode()) {
             onResult.accept(null);
             return;
         }
@@ -287,6 +293,15 @@ public class CalibrationDialogWidget {
         }
 
         IniField field = valuesField.get();
+        ConfigurationImage secondaryImage =
+            uiContext.getWorkingSecondaryTunePages().get(field.getPageIndex());
+        if (secondaryImage != null) {
+            TuningTableView view = new TuningTableView(table.getTitle(), true, tableOrientationConfig);
+            displaySecondaryTable(view, iniFileModel, table, field, secondaryImage, workingImage);
+            view.setOnOrientationChange(onTableOrientationChange);
+            view.show3D(show3D);
+            return view.getContent();
+        }
         TuningTableView view = new TuningTableView(table.getTitle(), true, tableOrientationConfig);
         view.setOnOrientationChange(onTableOrientationChange);
         view.show3D(show3D);
@@ -295,20 +310,50 @@ public class CalibrationDialogWidget {
         panel.add(status, BorderLayout.NORTH);
         panel.add(view.getContent(), BorderLayout.CENTER);
         ConfigurationImage axisImage = workingImage;
-        pageReader.read(field.getPageIndex(), field.getOffset(), field.getSize(), data -> {
-            if (data == null) {
+        int offset = field.getOffset();
+        int end = offset + field.getSize();
+        for (String axis : Arrays.asList(table.getXBinsConstant(), table.getYBinsConstant())) {
+            IniField bin = iniFileModel.findIniField(axis).orElse(null);
+            if (bin != null && bin.getPageIndex() == field.getPageIndex()) {
+                offset = Math.min(offset, bin.getOffset());
+                end = Math.max(end, bin.getOffset() + bin.getSize());
+            }
+        }
+        int readOffset = offset;
+        int readLength = end - offset;
+        pageReader.read(field.getPageIndex(), readOffset, readLength, data -> {
+            if (data == null || data.length != readLength) {
                 status.setText("Connect to the ECU to view this table");
                 return;
             }
-            byte[] page = new byte[field.getOffset() + data.length];
-            System.arraycopy(data, 0, page, field.getOffset(), data.length);
-            view.displayTable(iniFileModel, table.getTableId(),
+            byte[] page = new byte[readOffset + data.length];
+            System.arraycopy(data, 0, page, readOffset, data.length);
+            displaySecondaryTable(view, iniFileModel, table, field,
                 new ConfigurationImage(page, pageByteOrder(axisImage, iniFileModel)), axisImage);
             panel.remove(status);
             panel.revalidate();
             panel.repaint();
         });
         return panel;
+    }
+
+    private void displaySecondaryTable(TuningTableView view, IniFileModel ini, TableModel table, IniField values,
+                                       ConfigurationImage tablePage, ConfigurationImage mainPage) {
+        view.displayTable(ini, table.getTableId(), tablePage,
+            tableAxisPage(ini, table.getXBinsConstant(), values.getPageIndex(), tablePage, mainPage),
+            tableAxisPage(ini, table.getYBinsConstant(), values.getPageIndex(), tablePage, mainPage));
+    }
+
+    private ConfigurationImage tableAxisPage(IniFileModel ini, String name, int tablePageId,
+                                             ConfigurationImage tablePage, ConfigurationImage mainPage) {
+        IniField field = ini.findIniField(name).orElse(null);
+        if (field == null) {
+            return null;
+        }
+        if (field.getPageIndex() == 0) {
+            return mainPage;
+        }
+        return field.getPageIndex() == tablePageId ? tablePage : uiContext.getWorkingSecondaryTunePages().get(field.getPageIndex());
     }
 
     /** Curves on extra TS pages must use those page bytes, never same-offset main settings. */
@@ -329,6 +374,13 @@ public class CalibrationDialogWidget {
         }
         if (xField.getPageIndex() != yField.getPageIndex()) {
             return new JLabel("Curve bins are on different ECU pages");
+        }
+
+        ConfigurationImage secondaryImage =
+            uiContext.getWorkingSecondaryTunePages().get(xField.getPageIndex());
+        if (secondaryImage != null) {
+            CurveWidget widget = new CurveWidget(curve, ini, secondaryImage, workingImage, true);
+            return widget.getContentPane();
         }
 
         int offset = Math.min(xField.getOffset(), yField.getOffset());
@@ -841,11 +893,13 @@ public class CalibrationDialogWidget {
     /**
      * Gauges scale with the width the dialog offers: the dialog fills the viewport width, panels
      * holding gauges are marked {@link ConstrainedBorderLayout#GROWS} so they take the spare
-     * width, and the square grid fits as many gauges per row as that width allows and shares it
-     * between them, so the gauges always fill the width they are given.
+     * width, and the square grid uses the fewest columns that keep gauges within
+     * {@link #LARGEST_GAUGE_SIZE} (four gauges in a medium panel form a 2x2 grid) and shares the
+     * width between them, so the gauges always fill the width they are given.
      */
     private void renderGaugeGroup(JPanel container, List<String> gaugeNames, IniFileModel iniFileModel) {
-        JPanel gaugePanel = new JPanel(new SquareGridLayout(2, 4, MIN_GAUGE_SIZE, READOUT_GAUGE_SIZE));
+        JPanel gaugePanel = new JPanel(new SquareGridLayout(2, 4, MIN_GAUGE_SIZE, READOUT_GAUGE_SIZE,
+            LARGEST_GAUGE_SIZE));
         SquareGridLayout.revalidateOnWidthChange(gaugePanel);
         gaugePanel.putClientProperty(ConstrainedBorderLayout.GROWS, Boolean.TRUE);
         gaugePanel.setAlignmentX(Component.LEFT_ALIGNMENT);

@@ -3,11 +3,15 @@ package com.rusefi.ui.widgets.tune;
 import com.opensr5.ConfigurationImageTestHelper;
 import com.opensr5.ConfigurationImage;
 import com.opensr5.ConfigurationImageGetterSetter;
+import com.opensr5.ini.IniFileMetaInfoImpl;
 import com.opensr5.ini.IniFileModel;
+import com.opensr5.ini.RawIniFile;
 import com.opensr5.ini.TableModel;
 import com.opensr5.ini.field.ArrayIniField;
 import com.rusefi.config.FieldType;
 import com.rusefi.core.preferences.storage.Node;
+import com.rusefi.ini.reader.IniFileReaderUtil;
+import com.rusefi.ini.reader.IniParsingException;
 import org.junit.jupiter.api.Test;
 
 import javax.swing.*;
@@ -23,6 +27,7 @@ import java.beans.XMLDecoder;
 import java.beans.XMLEncoder;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -88,6 +93,8 @@ public class TuningTableViewTest {
             when(definition.getZBinsConstant()).thenReturn("timing");
             when(definition.getXBinsConstant()).thenReturn("rpm");
             when(definition.getYBinsConstant()).thenReturn("load");
+            when(definition.getXLabel()).thenReturn("RPM");
+            when(definition.getYLabel()).thenReturn("Load");
             when(ini.findIniField("timing")).thenReturn(Optional.of(timing));
             when(ini.findIniField("rpm")).thenReturn(Optional.of(rpm));
             when(ini.findIniField("load")).thenReturn(Optional.of(load));
@@ -126,6 +133,21 @@ public class TuningTableViewTest {
             assertArrayEquals(originalTiming, timingImage.getContent(), "Display options do not edit the tune");
             assertArrayEquals(originalAxes, axisImage.getContent());
             assertEquals(3, orientationChanges.get());
+
+            ConfigurationImage xPage = ConfigurationImageTestHelper.newLittleEndian(6);
+            ConfigurationImage yPage = ConfigurationImageTestHelper.newLittleEndian(10);
+            ConfigurationImageGetterSetter.setArrayValues(rpm, xPage, new Double[][]{{1000.0, 2500.0, 6000.0}});
+            ConfigurationImageGetterSetter.setArrayValues(load, yPage, new Double[][]{{40.0}, {120.0}});
+            TuningTableView mixedPages = new TuningTableView("Ignition timing", true, new Node());
+            mixedPages.displayTable(ini, "ignition", timingImage, xPage, yPage);
+            JTable mixedTable = findTable(mixedPages.getContent());
+            assertEquals("1000", mixedTable.getColumnName(1));
+            ((JCheckBoxMenuItem) mixedPages.orientationMenuFor(0).getComponent(0)).doClick(0);
+            assertEquals("40", mixedTable.getColumnName(1), "flipping keeps the Y-axis image");
+            assertEquals("6000", mixedTable.getValueAt(0, 0), "flipping keeps the X-axis image");
+            ((JCheckBoxMenuItem) mixedPages.orientationMenuFor(0).getComponent(1)).doClick(0);
+            assertEquals("120", mixedTable.getColumnName(1), "inverting after a flip keeps the Y page");
+            assertEquals("6000", mixedTable.getValueAt(0, 0), "inverting after a flip keeps the X page");
 
             table.setValueAt("77", 0, 1);
             table.setValueAt("88", 2, 2);
@@ -174,6 +196,184 @@ public class TuningTableViewTest {
         });
     }
 
+    /** The corner names the row axis, then the column axis, from the table's INI xyLabels. */
+    @Test
+    public void cornerNamesTheTableAxesFromTheIni() throws Exception {
+        SwingUtilities.invokeAndWait(() -> {
+            IniFileModel ini = mock(IniFileModel.class);
+            TableModel idle = axisTable(ini, "idle");
+            when(idle.getXLabel()).thenReturn("\"Coolant\"");
+            when(idle.getYLabel()).thenReturn("\"RPM\"");
+
+            Node settings = new Node();
+            TuningTableView view = new TuningTableView("Idle", false, settings);
+            ConfigurationImage image = ConfigurationImageTestHelper.newLittleEndian(10);
+            view.displayTable(ini, "idle", image, image);
+            JTable table = findTable(view.getContent());
+            assertEquals("RPM \\ Coolant", table.getColumnName(0), "rows are RPM, columns are coolant");
+
+            ((JCheckBoxMenuItem) view.orientationMenuFor(0).getComponent(0)).doClick();
+            assertEquals("Coolant \\ RPM", table.getColumnName(0), "flipping swaps the corner too");
+
+            TableModel unlabelled = axisTable(ini, "tpsTps");
+            when(unlabelled.getXBinsChannel()).thenReturn("tpsFrom");
+            when(unlabelled.getYBinsChannel()).thenReturn("tpsTo");
+            when(unlabelled.getYLabel()).thenReturn("\"\"");
+            TuningTableView other = new TuningTableView("TPS/TPS", false, new Node());
+            other.displayTable(ini, "tpsTps", image, image);
+            assertEquals("tpsTo \\ tpsFrom", findTable(other.getContent()).getColumnName(0),
+                "missing or empty labels fall back to the axis channel");
+
+            axisTable(ini, "bare");
+            TuningTableView bare = new TuningTableView("Bare", false, new Node());
+            bare.displayTable(ini, "bare", image, image);
+            assertEquals("bareY \\ bareX", findTable(bare.getContent()).getColumnName(0),
+                "without labels or channels the bins constants name the axes");
+        });
+    }
+
+    /**
+     * The VE table names its load axis with an expression that follows the fuel algorithm, the same
+     * chain as the real INI; the corner shows the chosen load, not the axis channel.
+     */
+    @Test
+    public void cornerResolvesExpressionAxisLabels() throws Exception, IniParsingException {
+        String text = "signature = \"test\"\n"
+            + "nPages = 1\npageSize = 20\npageReadCommand = \"R\"\nochBlockSize = 1\n"
+            + "[PcVariables]\n"
+            + "veAxisLabels = bits, U08, [0:1], \"MAP\", \"TPS\", \"Air Charge\", \"Lua\"\n"
+            + "veLoadSrc = scalar, U08, \"\", 1, 0, 0, 5, 0, noMsqSave\n"
+            + "[Constants]\npage = 1\n"
+            + "fuelAlgorithm = bits, U08, 0, [0:1], \"Speed Density\", \"MAF\", \"Alpha-N\", \"Lua\"\n"
+            + "veRpmBins = array, U16, 2, [3], \"RPM\", 1, 0, 0, 8000, 0\n"
+            + "veLoadBins = array, U16, 8, [2], \"kPa\", 1, 0, 0, 400, 0\n"
+            + "veTable = array, U08, 12, [3x2], \"%\", 1, 0, 0, 255, 0\n"
+            + "[ConstantsExtensions]\n"
+            + "defaultValue = veLoadSrc, 0\n"
+            + "maintainConstantValue = veLoadSrc, { fuelAlgorithm == 0 ? 0 : fuelAlgorithm == 2 ? 1 : fuelAlgorithm == 1 ? 2 : 3 }\n"
+            + "[TableEditor]\n"
+            + "table = veTableTbl, veTableMap, \"VE\", 1\n"
+            + "xyLabels = \"RPM\", {bitStringValue(veAxisLabels, veLoadSrc)}\n"
+            + "xBins = veRpmBins, RPMValue\n"
+            + "yBins = veLoadBins, veTableYAxisDisplay\n"
+            + "zBins = veTable\n";
+        RawIniFile lines = IniFileReaderUtil.read(new ByteArrayInputStream(text.getBytes(StandardCharsets.UTF_8)));
+        IniFileModel ini = IniFileReaderUtil.readIniFile(lines, "synthetic.ini", new IniFileMetaInfoImpl(lines));
+
+        SwingUtilities.invokeAndWait(() -> {
+            ConfigurationImage image = ConfigurationImageTestHelper.newLittleEndian(20);
+            TuningTableView view = new TuningTableView("VE", false, new Node());
+            view.displayTable(ini, "veTableTbl", image, image);
+            JTable table = findTable(view.getContent());
+            assertEquals("MAP \\ RPM", table.getColumnName(0), "Speed Density loads by MAP");
+
+            image.getContent()[0] = 2;
+            view.displayTable(ini, "veTableTbl", image, image);
+            assertEquals("TPS \\ RPM", table.getColumnName(0), "Alpha-N loads by TPS");
+        });
+    }
+
+    /**
+     * Users with regional settings type a comma as the decimal separator: cells, the cell editor,
+     * axis values, the delta field, the = dialog and the comma key.
+     */
+    @Test
+    public void commaDecimalSeparator() throws Exception {
+        SwingUtilities.invokeAndWait(() -> {
+            AtomicReference<String> dialogText = new AtomicReference<>();
+            TuningTableView view = new TuningTableView("Comma") {
+                @Override
+                protected int showConfirmDialog(JPanel panel) {
+                    for (Component component : panel.getComponents()) {
+                        if (component instanceof JTextField) {
+                            ((JTextField) component).setText(dialogText.get());
+                        }
+                    }
+                    return JOptionPane.OK_OPTION;
+                }
+            };
+            IniFileModel ini = mock(IniFileModel.class);
+            TableModel definition = mock(TableModel.class);
+            ArrayIniField z = new ArrayIniField("z", 0, FieldType.UINT8, 2, 2, "", 0.1, "0", "25", "1");
+            ArrayIniField x = new ArrayIniField("x", 4, FieldType.UINT16, 2, 1, "", 0.5, "0", "1000", "1");
+            ArrayIniField y = new ArrayIniField("y", 8, FieldType.UINT16, 1, 2, "", 0.5, "0", "1000", "1");
+            ConfigurationImage image = ConfigurationImageTestHelper.newLittleEndian(12);
+            ConfigurationImageGetterSetter.setArrayValues(z, image, new Double[][]{{1.0, 2.0}, {3.0, 4.0}});
+            ConfigurationImageGetterSetter.setArrayValues(x, image, new Double[][]{{100.0, 200.0}});
+            ConfigurationImageGetterSetter.setArrayValues(y, image, new Double[][]{{10.0}, {20.0}});
+            when(ini.getTable("table")).thenReturn(definition);
+            when(definition.getZBinsConstant()).thenReturn("z");
+            when(definition.getXBinsConstant()).thenReturn("x");
+            when(definition.getYBinsConstant()).thenReturn("y");
+            when(ini.findIniField("z")).thenReturn(Optional.of(z));
+            when(ini.findIniField("x")).thenReturn(Optional.of(x));
+            when(ini.findIniField("y")).thenReturn(Optional.of(y));
+            view.displayTable(ini, "table", image, image);
+            JTable table = findTable(view.getContent());
+            // Table row 0 is the top row, the last Y bin: data row 1.
+
+            table.setValueAt("2,5", 0, 1);
+            assertEquals(2.5, ConfigurationImageGetterSetter.getArrayValues(z, image)[1][0], 0.001, "cell");
+
+            table.setValueAt("12,5", 1, 0);
+            assertEquals(12.5, ConfigurationImageGetterSetter.getArrayValues(y, image)[0][0], 0.001, "Y axis");
+
+            table.changeSelection(1, 1, false, false);
+            findTextField(view.getContent(), "0.5").setText("0,5");
+            findButton(view.getContent(), "Up").doClick();
+            assertEquals(1.5, ConfigurationImageGetterSetter.getArrayValues(z, image)[0][0], 0.001, "delta");
+
+            table.changeSelection(1, 2, false, false);
+            dialogText.set("7,5");
+            findButton(view.getContent(), "=").doClick();
+            assertEquals(7.5, ConfigurationImageGetterSetter.getArrayValues(z, image)[0][1], 0.001, "= dialog");
+
+            table.changeSelection(0, 2, false, false);
+            assertTrue(table.editCellAt(0, 2));
+            ((JTextField) table.getEditorComponent()).setText("2,5");
+            assertTrue(table.getCellEditor().stopCellEditing(), "the editor accepts a comma");
+            assertEquals(2.5, ConfigurationImageGetterSetter.getArrayValues(z, image)[1][1], 0.001, "editor");
+
+            // The comma key types the decimal point into a multi-cell entry, like the period.
+            table.changeSelection(0, 1, false, false);
+            table.changeSelection(0, 2, false, true);
+            pressKey(table, "typed 3");
+            pressKey(table, "typed ,");
+            pressKey(table, "typed 5");
+            Double[][] typed = ConfigurationImageGetterSetter.getArrayValues(z, image);
+            assertEquals(3.5, typed[1][0], 0.001, "comma key");
+            assertEquals(3.5, typed[1][1], 0.001, "comma key");
+            pressKey(table, "typed ,");
+            assertEquals(3.5, ConfigurationImageGetterSetter.getArrayValues(z, image)[1][0], 0.001,
+                "a second separator is ignored");
+
+            table.getTableHeader().setSize(300, 30);
+            Rectangle header = table.getTableHeader().getHeaderRect(2);
+            table.getTableHeader().dispatchEvent(new MouseEvent(table.getTableHeader(), MouseEvent.MOUSE_CLICKED,
+                System.currentTimeMillis(), 0, header.x + 5, 10, 2, false, MouseEvent.BUTTON1));
+            JTextField axisEditor = findTextField(table.getTableHeader(), "200");
+            assertNotNull(axisEditor);
+            axisEditor.setText("150,5");
+            pressKey(axisEditor, "ENTER");
+            assertEquals(150.5, ConfigurationImageGetterSetter.getArrayValues(x, image)[0][1], 0.001, "X axis");
+        });
+    }
+
+    private static TableModel axisTable(IniFileModel ini, String name) {
+        TableModel definition = mock(TableModel.class);
+        ArrayIniField z = new ArrayIniField(name + "Z", 0, FieldType.UINT8, 3, 2, "", 1, "0", "255", "0");
+        ArrayIniField x = new ArrayIniField(name + "X", 0, FieldType.UINT16, 3, 1, "", 1, "0", "8000", "0");
+        ArrayIniField y = new ArrayIniField(name + "Y", 6, FieldType.UINT16, 1, 2, "", 1, "0", "8000", "0");
+        when(ini.getTable(name)).thenReturn(definition);
+        when(definition.getZBinsConstant()).thenReturn(z.getName());
+        when(definition.getXBinsConstant()).thenReturn(x.getName());
+        when(definition.getYBinsConstant()).thenReturn(y.getName());
+        when(ini.findIniField(z.getName())).thenReturn(Optional.of(z));
+        when(ini.findIniField(x.getName())).thenReturn(Optional.of(x));
+        when(ini.findIniField(y.getName())).thenReturn(Optional.of(y));
+        return definition;
+    }
+
     private Node roundTrip(Node node) {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         try (XMLEncoder encoder = new XMLEncoder(bytes)) {
@@ -205,6 +405,8 @@ public class TuningTableViewTest {
             when(definition.getZBinsConstant()).thenReturn("timing");
             when(definition.getXBinsConstant()).thenReturn("rpm");
             when(definition.getYBinsConstant()).thenReturn("load");
+            when(definition.getXLabel()).thenReturn("RPM");
+            when(definition.getYLabel()).thenReturn("Load");
             when(ini.findIniField("timing")).thenReturn(Optional.of(timing));
             when(ini.findIniField("rpm")).thenReturn(Optional.of(rpm));
             when(ini.findIniField("load")).thenReturn(Optional.of(load));
@@ -220,7 +422,7 @@ public class TuningTableViewTest {
             assertArrayEquals(new Object[]{"40", "11", "22", "33"}, tableRow(table, 1));
             assertEquals(CalibrationColorPalette.background(44, 11, 66), cellBackground(table, 0, 1));
             assertEquals(CalibrationColorPalette.background(33, 11, 66), cellBackground(table, 1, 3));
-            assertEquals(table.getBackground(), cellBackground(table, 0, 0),
+            assertEquals(CalibrationColorPalette.axisBackground(), cellBackground(table, 0, 0),
                 "Axis labels are not shaded as timing values");
 
             table.setValueAt("77", 0, 1);
@@ -1247,25 +1449,62 @@ public class TuningTableViewTest {
         TuningTableView.TuningTableModel model = new TuningTableView.TuningTableModel(data, new Double[]{100.0, 200.0}, new Double[]{10.0, 20.0}, 2);
         table.setModel(model);
 
-        // Whole numbers omit an all-zero decimal part.
-        assertEquals("3", table.getValueAt(0, 1));
-        assertEquals("1", table.getValueAt(1, 1));
-        // Non-zero decimal parts keep the configured precision.
+        // Every value shows the configured precision, so the decimals line up down a column.
+        assertEquals("3.00", table.getValueAt(0, 1));
+        assertEquals("1.00", table.getValueAt(1, 1));
         assertEquals("1.20", table.getValueAt(0, 2));
         // data[0][1] is 2.55, with precision 2 it should be "2.55"
         assertEquals("2.55", table.getValueAt(1, 2));
     }
 
     @Test
-    public void testNumbersAreCentered() {
+    public void testValuesAndAxisAreCentered() {
         TuningTableView view = new TuningTableView("Test");
         JTable table = findTable(view.getContent());
         table.setModel(new TuningTableView.TuningTableModel(
             new Double[][]{{1.0}}, new Double[]{100.0}, new Double[]{10.0}, 1));
 
-        Component renderer = table.prepareRenderer(table.getCellRenderer(0, 1), 0, 1);
-        assertTrue(renderer instanceof JLabel);
-        assertEquals(SwingConstants.CENTER, ((JLabel) renderer).getHorizontalAlignment());
+        Component value = table.prepareRenderer(table.getCellRenderer(0, 1), 0, 1);
+        assertTrue(value instanceof JLabel);
+        assertEquals(SwingConstants.CENTER, ((JLabel) value).getHorizontalAlignment());
+        Component axis = table.prepareRenderer(table.getCellRenderer(0, 0), 0, 0);
+        assertEquals(SwingConstants.CENTER, ((JLabel) axis).getHorizontalAlignment());
+    }
+
+    @Test
+    public void cellsAreTilesWithGapsAndNoGridLines() {
+        JTable table = findTable(new TuningTableView("Test").getContent());
+        assertEquals(new Dimension(2, 2), table.getIntercellSpacing());
+        assertFalse(table.getShowHorizontalLines());
+        assertFalse(table.getShowVerticalLines());
+    }
+
+    @Test
+    public void selectionTintsTheValueColourAndOutlinesTheBlock() {
+        TuningTableView view = new TuningTableView("Test");
+        JTable table = findTable(view.getContent());
+        table.setModel(new TuningTableView.TuningTableModel(
+            new Double[][]{{10.0, 20.0, 30.0}, {40.0, 50.0, 60.0}}, new Double[]{1.0, 2.0, 3.0}, new Double[]{1.0, 2.0}, 0));
+        Color unselected = ((JLabel) table.prepareRenderer(table.getCellRenderer(0, 1), 0, 1)).getBackground();
+
+        table.changeSelection(0, 1, false, false);
+        table.changeSelection(1, 2, false, true);
+
+        JLabel corner = (JLabel) table.prepareRenderer(table.getCellRenderer(0, 1), 0, 1);
+        assertEquals(CalibrationColorPalette.selected(unselected), corner.getBackground(),
+            "the value colour shows through the tint");
+        assertEquals(new Insets(2, 2, 0, 0), outline(corner), "top-left cell: outline on its outer sides only");
+        assertEquals(new Insets(0, 0, 2, 2), outline((JLabel) table.prepareRenderer(table.getCellRenderer(1, 2), 1, 2)));
+        JLabel outside = (JLabel) table.prepareRenderer(table.getCellRenderer(0, 3), 0, 3);
+        assertFalse(outside.getBorder() instanceof javax.swing.border.CompoundBorder
+            && ((javax.swing.border.CompoundBorder) outside.getBorder()).getOutsideBorder() instanceof javax.swing.border.MatteBorder);
+    }
+
+    private static Insets outline(JLabel cell) {
+        javax.swing.border.Border outside = ((javax.swing.border.CompoundBorder) cell.getBorder()).getOutsideBorder();
+        assertTrue(outside instanceof javax.swing.border.MatteBorder);
+        assertEquals(CalibrationColorPalette.selection(), ((javax.swing.border.MatteBorder) outside).getMatteColor());
+        return outside.getBorderInsets(cell);
     }
 
     @Test

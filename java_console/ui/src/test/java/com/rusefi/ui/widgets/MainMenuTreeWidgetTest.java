@@ -255,6 +255,32 @@ todo: spllit into smaller tests?
 
         assertEquals(4, new HashSet<>(Arrays.asList(groupIcon, dialogIcon, tableIcon, curveIcon)).size(),
             "Each node type should have a distinct icon");
+
+        // VE and Ignition advance open a dialog that only wraps the table with selector panels;
+        // Anti-Lag is a settings page that also holds tables.
+        assertSame(tableIcon, verifyIcon(tree, findAnywhere(root, "VE"), "VE", 18),
+            "A dialog that only wraps a table shows the table icon");
+        assertSame(tableIcon, verifyIcon(tree, findAnywhere(root, "Ignition advance"), "Ignition advance", 18),
+            "A dialog that only wraps a table shows the table icon");
+        assertSame(dialogIcon, verifyIcon(tree, findAnywhere(root, "Anti-Lag ALS"), "Anti-Lag ALS", 18),
+            "A page with its own settings keeps the settings icon");
+        assertSame(dialogIcon, verifyIcon(tree, findAnywhere(root, "Knock Control"), "Knock Control", 18),
+            "Many settings in panels beside a curve keep the settings icon");
+    }
+
+    private static DefaultMutableTreeNode findAnywhere(DefaultMutableTreeNode parent, String name) {
+        for (int i = 0; i < parent.getChildCount(); i++) {
+            DefaultMutableTreeNode node = (DefaultMutableTreeNode) parent.getChildAt(i);
+            Object userObject = node.getUserObject();
+            if (userObject instanceof SubMenuModel && name.equals(((SubMenuModel) userObject).getName())) {
+                return node;
+            }
+            DefaultMutableTreeNode found = findAnywhere(node, name);
+            if (found != null) {
+                return found;
+            }
+        }
+        return null;
     }
 
     @Test
@@ -809,9 +835,10 @@ todo: spllit into smaller tests?
         assertEquals(2, content.getComponentCount());
         JPanel curvePanel = (JPanel) content.getComponent(1);
 
-        // CurveWidget content has GridBagLayout: Canvas (weightx=0.8) and Table panel (weightx=0.2)
+        // CurveWidget content has GridBagLayout: Canvas (weightx=0.8), Table panel (weightx=0.2)
+        // and the "Fit to limits" row above them
         assertTrue(curvePanel.getLayout() instanceof GridBagLayout);
-        assertEquals(2, curvePanel.getComponentCount());
+        assertEquals(3, curvePanel.getComponentCount());
 
         // Verify weights
         GridBagLayout gbl = (GridBagLayout) curvePanel.getLayout();
@@ -935,7 +962,7 @@ todo: spllit into smaller tests?
                 realG2.drawString(str, x, y);
             }
             @Override public void drawLine(int x1, int y1, int x2, int y2) {
-                if (new Color(200, 200, 200, 100).equals(this.color)) {
+                if (com.rusefi.ui.widgets.tune.CurveWidget.gridColor().equals(this.color)) {
                     if (x1 == x2) {
                         verticalLines[0]++;
                         xPositions.add(x1);

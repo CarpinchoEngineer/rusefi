@@ -79,7 +79,7 @@ public class BinaryProtocol {
     private final Object publicationLock = new Object();
     private final Integer blockingFactorOverride;
     private final LongSupplier currentTimeMillis;
-    private boolean isBurnPending;
+    private boolean mainPageBurnPending;
     private long lastOutputFallbackGeneration = Long.MIN_VALUE;
     private volatile boolean lastOutputPollWasFull = true;
     private long nextTextPullNanos;
@@ -303,10 +303,18 @@ public class BinaryProtocol {
             // Let's check if we can use reflection or if there is a better way.
             // For now, let's try to fix the import or use the full name if it's available.
         } catch (IniNotFoundException e) {
-            log.info("INI not found for signature: " + signature);
-            linkManager.recordMissingIniFailure(signature);
-            close();
-            return "Failed to located .ini";
+            // #10349: the usual paths (bundle, cache, download) had no match. Pull the
+            // .ini straight from the ECU's embedded filesystem image over the live link.
+            log.info("INI not found for signature: " + signature + ", pulling it from the ECU");
+            try {
+                iniFile = Objects.requireNonNull(downloadIniFromEcu(signature));
+                linkManager.clearMissingIniFailure();
+            } catch (Throwable ecuPull) {
+                log.info("Could not pull .ini from the ECU: " + ecuPull);
+                linkManager.recordMissingIniFailure(signature);
+                close();
+                return "Failed to located .ini";
+            }
         }
         if (isSinglePageController()) {
             log.info("*** COMPATIBILITY MODE: older single-page firmware");
@@ -334,6 +342,36 @@ public class BinaryProtocol {
         }
         log.info("connectAndReadConfiguration: completed successfully");
         return null;
+    }
+
+    /**
+     * #10349: pull the .ini from the ECU's embedded filesystem image over the live
+     * link, cache it under the ECU signature, and resolve it through the normal
+     * provider (which validates the signature). Runs on the connection thread.
+     */
+    @NotNull
+    private IniFileModel downloadIniFromEcu(String signature) throws IOException, IniNotFoundException {
+        final com.rusefi.ui.StatusConsumer status = iniFileProvider.getStatusConsumer();
+        status.logLine("No local .ini for " + signature + "; downloading it from the ECU over CAN...");
+        final int[] lastShownPct = {-1};
+        byte[] iniBytes = CanIniDownloader.downloadIni(this, (bytesRead, totalBytes) -> {
+            int pct = totalBytes > 0 ? (int) (bytesRead * 100L / totalBytes) : 0;
+            // throttle to whole-percent changes so the UI isn't flooded (~38 chunks of 4 KB)
+            if (pct != lastShownPct[0]) {
+                lastShownPct[0] = pct;
+                status.logLine(String.format("Downloading .ini from ECU: %d%% (%d / %d bytes)",
+                        pct, bytesRead, totalBytes));
+            }
+        });
+        status.logLine("Extracting .ini from the ECU image...");
+        java.io.File tmp = java.io.File.createTempFile("rusefi_ecu_", ".ini");
+        tmp.deleteOnExit();
+        java.nio.file.Files.write(tmp.toPath(), iniBytes);
+        log.info("Pulled " + iniBytes.length + " .ini bytes from the ECU, caching for " + signature);
+        status.logLine("Got .ini from the ECU (" + iniBytes.length + " bytes), caching for " + signature);
+        // so subsequent connects resolve it without any download or prompt
+        SignatureHelper.importIntoCache(signature, tmp);
+        return iniFileProvider.provide(signature);
     }
 
     private void startPullThread(final DataListener textListener) {
@@ -858,8 +896,8 @@ public class BinaryProtocol {
                 // Only an acknowledged main-page write advances our RAM comparison image.
                 // The separately cached loaded baseline remains unchanged.
                 state.recordPage0Write(content, contentOffset, ecuOffset, size);
+                mainPageBurnPending = true;
             }
-            isBurnPending = true;
             return;
         }
         stream.close();
@@ -871,7 +909,7 @@ public class BinaryProtocol {
         if (stream.isClosed()) {
             throw new IllegalStateException("ECU connection is closed; cannot burn configuration");
         }
-        if (!isBurnPending)
+        if (!mainPageBurnPending)
             return;
         log.info("Need to burn");
 
@@ -879,7 +917,7 @@ public class BinaryProtocol {
         while (!stream.isClosed() && (System.currentTimeMillis() - start < Timeouts.BINARY_IO_TIMEOUT)) {
             if (BurnCommand.execute(this)) {
                 log.info("BURN OK");
-                isBurnPending = false;
+                mainPageBurnPending = false;
                 return;
             }
             log.warn("BURN HAS FAILED?! Will retry");
@@ -893,8 +931,8 @@ public class BinaryProtocol {
 
     public boolean burnPage(int pageIdentifier) {
         boolean result = BurnCommand.execute(this, pageIdentifier);
-        if (result) {
-            isBurnPending = false;
+        if (result && pageIdentifier == 0) {
+            mainPageBurnPending = false;
         }
         return result;
     }

@@ -2,6 +2,32 @@
 
 Build-system, CI and simulator details moved out of CLAUDE.md.
 
+### Dependency caches
+
+The shared Java setup action uses `gradle/actions/setup-gradle` as the sole
+Gradle cache owner, including downloaded distributions and dependencies.
+Pull-request and pull-request-target runs restore caches read-only; other
+events can populate their branch-scoped caches. Do not add overlapping
+`setup-java` or manual Gradle-home caching.
+
+Linux firmware and universal-bundle jobs persist only the pinned Windows
+dependency archives under `~/.cache/rusefi/7za` and `~/.cache/rusefi/jre`.
+The archive preparation helpers verify checksums even after cache restoration.
+Extracted runtimes, generated files and firmware build outputs are not part of
+these dependency caches.
+
+Cache keys track the 7za preparation script or JRE manifest, not board names or
+commit IDs. GitHub cache entries are immutable: if a stored entry is corrupt,
+delete that entry or bump the corresponding cache-key version to replace it.
+Cold or evicted caches still require upstream downloads; concurrent jobs can
+download the same dependency before the first successful job saves its cache.
+Bounded retries handle transient failures without accepting unverified files.
+The JRE downloader honors numeric `Retry-After` delays up to 30 seconds;
+unsupported header forms fall back to exponential delays. A longer requested
+delay is capped rather than extending the CI wait indefinitely.
+Explicit offline archive inputs remain fail-closed and are never repaired or
+modified automatically.
+
 Firmware and unit-test builds keep dependency files in `firmware/.dep/` and `unit_tests/.dep/` (separate from the object dirs). After a source file is moved or deleted (e.g. a controller promoted into `controllers/modules/`), incremental builds fail with `No rule to make target '<old path>.cpp'` until the stale `.dep` is removed - `make clean` or `rm -rf .dep` fixes it; wiping only `build/obj` does not. Also note the first build after such a wipe can measure several KB larger than an identical follow-up build - for flash-size comparisons, compare consecutive rebuilds of each variant, never a single post-wipe build. `firmware/bin/compile.sh` has been observed to exit 0 even when the underlying `make` failed - check the log (or that `build/rusefi.elf` got a new timestamp), not just the exit code.
 
 After ChibiOS build-rule changes, validate generated-header dependencies with an empty `DEPDIR` (a fresh directory under `/tmp` is sufficient). Existing compiler-generated `.dep` files can hide missing explicit Makefile prerequisites: an incremental build generates the RAM disk correctly while a clean CI build compiles against its checked-in placeholder header.
@@ -21,6 +47,30 @@ boards using their metadata `SKIP_RATE`; a green master run is not evidence
 that a particular board was built.
 
 ### Hardware CI settings-write timing
+
+Trigger geometry updates require zero measured RPM (`[tag:trigger_update_zero_rpm]`),
+and a rejected update is not retried on engine stop, so the autotest helpers wait for
+the reported RPM instead of sleeping:
+
+- `EcuTestHelper.setEngineType()` disables self-stimulation and waits for a fresh zero
+  RPM sample before `set engine_type`. A fixed two-second sleep is not enough: the
+  firmware no-events timeout (`NO_RPM_EVENTS_TIMEOUT_SECS`) is also two seconds.
+- `EcuTestHelper.sendTriggerConfigurationCommand()` wraps a direct trigger command
+  (`set trigger_type`, `set_toothed_wheel`) in stop stimulation / wait for zero /
+  command / resume self-stimulation. `stopStimulationAndAwaitZeroRpm()` is the first
+  half, for tests which continue with external stimulation.
+- `rpm 0` is not a way to reach zero RPM under self-stimulation: the paused stimulator
+  PWM still invokes its state callback every `NAN_FREQUENCY_SLEEP_PERIOD_MS`, which
+  feeds one trigger edge each time, so measured RPM settles at a low non-zero value.
+- `IoUtil.awaitRpm()` listens for value changes and waits its full timeout when RPM
+  already has the target value; `EcuTestHelper.assertSensorEventually()` accepts an
+  unchanged fresh sample.
+
+A skipped rebuild shows up as `Skipping trigger configuration update: RPM > 0` in the
+test log. The stimulator and decoder then keep the previous engine's shape while the RPM
+multiplier follows the new configuration, typically as `rpm change did not happen` with
+a 2x or 0.5x RPM. Commands which change `globalTriggerAngleOffset` at speed are skipped
+the same way.
 
 Hardware CI's F407 `HighRevTest` is sensitive to asynchronous settings burns: `setEngineType()` queues a forced save, while the Java helper resumes configuration changes after a fixed sleep. Passing master runs can already contain `Flash: validation failed`; do not treat that message alone as a new regression. In PR #10186, adding a 5 s settings retry backoff moved the next erase from the RPM settling period into the 40 s assertion window, producing `engine stopped`, ~1200 ms coil-overcharge warnings, and 6000 -> 0 RPM failures. Self-stimulation explicitly permits settings writes even on F4, where flash erase stalls execution. Check flash-write timing against the assertion window before investigating trigger decoding. The cause of the original validation mismatches was not established by those logs (concurrent mutation of the live configuration is a candidate).
 

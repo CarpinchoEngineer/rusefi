@@ -37,7 +37,7 @@ class TextGaugeTraceTest {
         IniFileModel ini = mock(IniFileModel.class);
         when(ini.getGauge("afr1Gauge")).thenReturn(afr);
         UIContext uiContext = new UIContext();
-        uiContext.setIniFileModelForOffline(ini);
+        uiContext.iniFileState.setIniFileModelForTest(ini);
         return uiContext;
     }
 
@@ -58,7 +58,7 @@ class TextGaugeTraceTest {
     @Test
     void unknownChannelDrawsNothing() {
         UIContext uiContext = new UIContext();
-        uiContext.setIniFileModelForOffline(mock(IniFileModel.class));
+        uiContext.iniFileState.setIniFileModelForTest(mock(IniFileModel.class));
 
         TextGauge gauge = new TextGauge(uiContext, "noSuchGauge", new Node(), name -> { });
         try {
@@ -131,7 +131,7 @@ class TextGaugeTraceTest {
     @Test
     void noScaleItemForAGaugeTheIniDoesNotKnow() {
         UIContext uiContext = new UIContext();
-        uiContext.setIniFileModelForOffline(mock(IniFileModel.class));
+        uiContext.iniFileState.setIniFileModelForTest(mock(IniFileModel.class));
         TextGauge gauge = new TextGauge(uiContext, "noSuchGauge", new Node(), name -> { });
         try {
             assertEquals(0, gauge.createPopupMenu(uiContext, name -> { }).getComponentCount());
@@ -155,7 +155,8 @@ class TextGaugeTraceTest {
         SensorCentral sensors = SensorCentral.getInstance();
         ConnectionStatusValue previous = ConnectionStatusLogic.INSTANCE.getValue();
         ConnectionStatusLogic.INSTANCE.setValue(ConnectionStatusValue.CONNECTED);
-        TextGauge gauge = new TextGauge(uiContext, "steadyGauge", new Node(), name -> { });
+        // All three samples belong to the same history window, even if the Swing thread stalls.
+        TextGauge gauge = new TextGauge(uiContext, "steadyGauge", new Node(), name -> { }, () -> 0L);
         try {
             gauge.setActive(true);
             assertTrue(sensors.getOutputChannelDemand().getChannels().contains("steadychannel"));

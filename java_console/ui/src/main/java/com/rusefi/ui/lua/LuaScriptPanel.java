@@ -5,6 +5,7 @@ import com.opensr5.ConfigurationImage;
 import com.opensr5.ini.IniFileModel;
 import com.opensr5.ini.field.StringIniField;
 import com.rusefi.binaryprotocol.BinaryProtocol;
+import com.rusefi.core.MessagesCentral;
 import com.rusefi.binaryprotocol.ShortcutsHelper;
 import com.rusefi.config.generated.Integration;
 import com.rusefi.core.ui.AutoupdateUtil;
@@ -86,10 +87,36 @@ public class LuaScriptPanel {
 
         burnButton.addActionListener(e -> {
             LinkManager linkManager = context.getLinkManager();
+            BinaryProtocol bp = linkManager.getBinaryProtocol();
+            if (bp == null || context.isOfflineMode() || context.isTuneReviewInProgress()) {
+                return;
+            }
 
-            linkManager.submit(() -> {
-                BinaryProtocol bp = linkManager.getBinaryProtocol();
-                bp.burn();
+            submitCommunicationTask.accept(() -> {
+                if (linkManager.getBinaryProtocol() != bp || bp.isClosed()
+                        || context.isOfflineMode() || context.isTuneReviewInProgress()) {
+                    return;
+                }
+                try {
+                    StringIniField field = getLuaScriptField(bp);
+                    if (field == null) {
+                        throw new IllegalStateException("The ECU's INI does not define a Lua page.");
+                    }
+                    if (field.getPageIndex() == 0) {
+                        bp.burn();
+                    } else if (!bp.burnPage(field.getPageIndex())) {
+                        throw new IllegalStateException("The ECU rejected the Lua page burn.");
+                    } else {
+                        SwingUtilities.invokeLater(() -> {
+                            if (context.getBinaryProtocol() == bp) {
+                                context.publishSecondaryTuneBurn(field.getPageIndex());
+                            }
+                        });
+                    }
+                } catch (RuntimeException ex) {
+                    MessagesCentral.getInstance().postMessage(LuaScriptPanel.class,
+                        "Failed to burn Lua: " + ex.getMessage());
+                }
             });
         });
 
@@ -116,6 +143,21 @@ public class LuaScriptPanel {
 
         // Center panel - script editor and log, each under its own titled header
         scriptText = new LuaTextEditor(context);
+        if (context.isOfflineMode()) {
+            IniFileModel ini = context.iniFileState.getIniFileModel();
+            StringIniField field = ini == null ? null : ini.findIniField("LUASCRIPT")
+                .filter(f -> f instanceof StringIniField)
+                .map(f -> (StringIniField) f)
+                .orElse(null);
+            if (field != null) {
+                ConfigurationImage page = field.getPageIndex() == 0
+                    ? context.getCurrentConfigurationImage()
+                    : context.getWorkingSecondaryTunePages().get(field.getPageIndex());
+                if (page != null) {
+                    setTextIfUnmodified(scriptFrom(page, field));
+                }
+            }
+        }
         JPanel scriptPanel = new JPanel(new BorderLayout());
         scriptPanel.add(ToolbarStrip.header(SCRIPT, null), BorderLayout.NORTH);
         scriptPanel.add(scriptText.getControl(), BorderLayout.CENTER);
@@ -382,7 +424,7 @@ public class LuaScriptPanel {
     private void writeScriptToEcu() {
         String script = getScript();
         BinaryProtocol bp = context.getBinaryProtocol();
-        if (bp == null) {
+        if (bp == null || context.isOfflineMode() || context.isTuneReviewInProgress()) {
             return;
         }
         StringIniField field = getLuaScriptField(bp);
@@ -399,16 +441,25 @@ public class LuaScriptPanel {
         }
 
         submitCommunicationTask.accept(() -> {
-            if (context.getBinaryProtocol() != bp || bp.isClosed()) {
+            if (context.getBinaryProtocol() != bp || bp.isClosed()
+                    || context.isOfflineMode() || context.isTuneReviewInProgress()) {
                 return;
             }
             try {
+                ConfigurationImage before = readSecondaryTunePage(bp, field);
                 log.info("Sending " + field + " page=" + field.getDisplayPage());
                 bp.writeInBlocks(paddedScript, 0, field.getOffset(), paddedScript.length, field.getPageIndex());
+                ConfigurationImage after = before == null ? null : before.clone();
+                if (after != null) {
+                    System.arraycopy(paddedScript, 0, after.getContent(), field.getOffset(), paddedScript.length);
+                }
                 // Reset only after the direct write is acknowledged, not after the tune's debounce.
                 resetLua();
                 SwingUtilities.invokeLater(() -> {
                     if (context.getBinaryProtocol() == bp) {
+                        if (after != null) {
+                            context.publishSecondaryTuneEdit(field.getPageIndex(), before, after);
+                        }
                         scriptText.markWrittenTextClean(script);
                     }
                 });
@@ -420,6 +471,24 @@ public class LuaScriptPanel {
         mp.setPaused(false);
         // the new script may no longer send 'set_bg_color=', drop back to default
         MessagesPaneBackgroundColor.reset();
+    }
+
+    private static ConfigurationImage readSecondaryTunePage(BinaryProtocol bp, StringIniField field) {
+        if (field.getPageIndex() == 0) {
+            return null;
+        }
+        com.opensr5.ini.IniFileMetaInfo meta = bp.getIniFileNullable().getMetaInfo();
+        for (int ordinal = 1; ordinal < meta.getnPages(); ordinal++) {
+            if (meta.getPageIdentifier(ordinal) == field.getPageIndex()) {
+                int size = meta.getPageSize(ordinal);
+                byte[] bytes = bp.readFromPage(field.getPageIndex(), 0, size);
+                if (bytes == null || bytes.length != size || field.getOffset() + field.getSize() > size) {
+                    throw new IllegalStateException("Unable to read the Lua calibration page.");
+                }
+                return new ConfigurationImage(bytes, bp.getWireByteOrder());
+            }
+        }
+        return null;
     }
 
     private static byte @NotNull [] getScriptBytes(StringIniField luaScript, String script) {

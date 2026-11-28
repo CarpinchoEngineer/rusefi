@@ -9,10 +9,11 @@ name: Firmware at GHA
 # statement one: github actions are technically not free
 # statement three: on top of dollar cost, actions get queued meaning other collaborators have to wait
 # statement three: in case of bad commit/bad PR more than one annoying email is sent
-# in light of above we have two mechanisms to reduce github action runner consumption:
-# * 'only' syntax allow to build only specified configuration, for example 'only:uaefi' line in the commit message would only build 'uaefi' firmware configuration
+# in light of above we have three mechanisms to reduce github action runner consumption:
+# * 'only' syntax selects a configuration from the push or PR head commit message, including on reruns (for example 'only:uaefi').
 # *        for random commits we can build zero firmware jobs if we do 'only:docs' or anything similar
 # * 'skip_rate' ratio in meta-info.env files allows to skip some builds with specific skip percentage
+# * Console UI/version, INI parser, console tests, Markdown docs, and firmware CI setup changes need only uaefi.
 #
 
 on:
@@ -149,18 +150,22 @@ jobs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
     - uses: actions/checkout@v7
+      with:
+        # Fetch both parents for changed files and the PR head commit message.
+        fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 1 }}
 
     - name: Set matrix
       id: set-matrix
       working-directory: firmware
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        RUN_ATTEMPT: ${{ github.run_attempt }}
+        COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       run: |
-        export EVENT_NAME="${{github.event_name}}"
-        export RUN_ATTEMPT="${{github.run_attempt}}"
-        read -d '' COMMIT_MESSAGE << EOM || true
-        ${{ github.event.head_commit.message }}
-        EOM
-        export COMMIT_MESSAGE
-        echo "matrix=$(bash bin/generate_matrix.sh config/boards)" >> $GITHUB_OUTPUT
+        MATRIX=$(bash bin/generate_matrix.sh config/boards)
+        printf 'matrix=%s\n' "$MATRIX" >> "$GITHUB_OUTPUT"
 
   build-firmware:
     runs-on: blacksmith-4vcpu-ubuntu-2604
@@ -216,10 +221,11 @@ jobs:
 
     - uses: ./.github/actions/setup-java
 
+    - uses: ./.github/actions/cache-bundle-dependencies
+
     - name: Install multilib, mingw, sshpass and mtools
       run: |
-        sudo bash misc/actions/add-ubuntu-latest-apt-mirrors.sh
-        sudo bash misc/actions/ubuntu-install-tools.sh
+        sudo bash misc/actions/ubuntu-install-tools.sh --ci
 
     - name: Set Build Env Variables
       env:
@@ -399,6 +405,8 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2604
     steps:
     - uses: actions/checkout@v7
+
+    - uses: ./.github/actions/cache-bundle-dependencies
 
     - name: Checkout bundle submodules
       run: git submodule update --init --depth=1 firmware/ext/rusefi-gha java_console/luaformatter java_console/peak-can-basic

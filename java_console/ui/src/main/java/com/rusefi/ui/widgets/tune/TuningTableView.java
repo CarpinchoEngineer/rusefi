@@ -2,8 +2,10 @@ package com.rusefi.ui.widgets.tune;
 
 import com.opensr5.ConfigurationImage;
 import com.opensr5.ConfigurationImageGetterSetter;
+import com.opensr5.ini.ExpressionEvaluator;
 import com.opensr5.ini.IniFileModel;
 import com.opensr5.ini.TableModel;
+import com.opensr5.ini.TsStringFunction;
 import com.opensr5.ini.field.ArrayIniField;
 import com.opensr5.ini.field.IniField;
 import com.opensr5.ini.field.PcVariableArrayIniField;
@@ -11,6 +13,7 @@ import com.rusefi.config.StringFormatter;
 import com.rusefi.core.preferences.storage.Node;
 import com.rusefi.maintenance.CalibrationsInfo;
 import com.rusefi.ui.util.WrapLayout;
+import com.rusefi.ui.widgets.JoinedButtons;
 import com.rusefi.ui.widgets.SegmentedControl;
 
 import javax.swing.*;
@@ -33,13 +36,15 @@ import java.awt.event.FocusAdapter;
 import java.awt.event.FocusEvent;
 import java.awt.geom.Ellipse2D;
 import java.awt.geom.Point2D;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Optional;
 import java.util.function.Consumer;
 import java.util.function.BiConsumer;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 public class TuningTableView {
-    private static final int TOOLBAR_GAP = 6;
     private static final double SMOOTHING_FACTOR = 0.25;
     private static final int MIN_PREVIEW_HEIGHT = 240;
     private final boolean viewMode;
@@ -55,6 +60,7 @@ public class TuningTableView {
         protected boolean processKeyBinding(KeyStroke stroke, KeyEvent event, int condition, boolean pressed) {
             if (pressed && !Character.isDigit(event.getKeyChar())
                 && event.getKeyCode() != KeyEvent.VK_PERIOD && event.getKeyCode() != KeyEvent.VK_DECIMAL
+                && event.getKeyCode() != KeyEvent.VK_COMMA
                 && event.getKeyCode() != KeyEvent.VK_BACK_SPACE) {
                 selectionInput = "";
             }
@@ -65,6 +71,23 @@ public class TuningTableView {
         protected void paintComponent(Graphics g) {
             super.paintComponent(g);
             paintLiveMarker(g);
+        }
+
+        @Override
+        public void updateUI() {
+            super.updateUI();
+            // Cells as tiles: no grid lines, the table background shows in the gaps.
+            setShowGrid(false);
+            setIntercellSpacing(new Dimension(CELL_GAP, CELL_GAP));
+        }
+
+        @Override
+        public void changeSelection(int row, int column, boolean toggle, boolean extend) {
+            super.changeSelection(row, column, toggle, extend);
+            // JTable scrolls to the cell without its gap, which leaves the first row 1 px under the top.
+            if (getAutoscrolls() && row >= 0 && column >= 0) {
+                scrollRectToVisible(getCellRect(row, column, true));
+            }
         }
 
         @Override
@@ -83,11 +106,14 @@ public class TuningTableView {
             return new Dimension(super.getPreferredScrollableViewportSize().width, getRowCount() * getRowHeight());
         }
     };
+    /** Gap between cells, where the table background shows. */
+    private static final int CELL_GAP = 2;
     /** Space around a cell's text, so values do not touch the grid lines. */
     private static final int CELL_TEXT_PADDING = 8;
     /** A column never needs more room than this to stay readable. */
     private static final int MAX_COLUMN_MIN_WIDTH = 90;
-    private static final int LIVE_DOT_RADIUS = 5;
+    /** The live dot is a ring about as tall as the digits, so it circles a centred value rather than hiding it. */
+    static final int LIVE_DOT_RADIUS = 7;
     private static final int TRAIL_DOT_RADIUS = 3;
     /** How long earlier operating points stay on the trail, fading out. */
     static final long TRAIL_MILLIS = 2000;
@@ -128,6 +154,7 @@ public class TuningTableView {
     private ConfigurationImage imageTarget;
     private ArrayIniField zBinsField;
     private ConfigurationImage axisImageTarget;
+    private ConfigurationImage yAxisImageTarget;
     private ArrayIniField xBinsField;
     private ArrayIniField yBinsField;
     private final JTextField xAxisEditor = new JTextField();
@@ -182,7 +209,6 @@ public class TuningTableView {
             }
         });
         table.getTableHeader().setReorderingAllowed(false);
-        table.setSelectionBackground(Color.ORANGE); // [tag:fixed_color] selected cells, with black text, in every theme
         table.setDefaultRenderer(Object.class, new GradientRenderer());
         table.setCellSelectionEnabled(true);
         table.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
@@ -264,7 +290,9 @@ public class TuningTableView {
 
         JTextField deltaField = new JTextField("0.5", 5);
         deltaField.setToolTipText("Amount added or subtracted by the Up and Down buttons");
-        deltaField.setMaximumSize(new Dimension(100, 30));
+        deltaField.setHorizontalAlignment(JTextField.RIGHT);
+        // as tall as the joined buttons beside it, so the row lines up
+        deltaField.setPreferredSize(new Dimension(deltaField.getPreferredSize().width, JoinedButtons.HEIGHT));
         JButton upButton = new JButton("Up");
         JButton downButton = new JButton("Down");
         JButton equalsButton = new JButton("=");
@@ -308,7 +336,7 @@ public class TuningTableView {
         interpolateButton.setToolTipText("Interpolate selected cells - Key: /");
         smoothButton.setToolTipText("Smooth selected cells - Key: S");
 
-        JLabel deltaLabel = new JLabel("delta:");
+        JLabel deltaLabel = new JLabel("Delta");
         editControls.add(deltaLabel);
         editControls.add(deltaField);
         editControls.add(upButton);
@@ -320,7 +348,7 @@ public class TuningTableView {
         editControls.add(smoothButton);
 
         // Wraps onto further lines in a narrow window rather than squeezing or cutting off controls.
-        JPanel topPanel = new JPanel(new WrapLayout(FlowLayout.LEFT, TOOLBAR_GAP, 4));
+        JPanel topPanel = new JPanel(new WrapLayout(FlowLayout.LEFT, JoinedButtons.ROW_GAP, 4));
         topPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
         topPanel.setBorder(BorderFactory.createEmptyBorder(0, 2, 0, 2));
         topPanel.add(new JLabel(title));
@@ -333,9 +361,10 @@ public class TuningTableView {
             delta.add(deltaLabel);
             delta.add(deltaField);
             topPanel.add(delta);
-            for (Component control : editControls.subList(2, editControls.size())) {
-                topPanel.add(control);
-            }
+            // Related actions share one outlined control, like the other console toolbars.
+            topPanel.add(new JoinedButtons(upButton, downButton, equalsButton));
+            topPanel.add(new JoinedButtons(horizontalButton, verticalButton));
+            topPanel.add(new JoinedButtons(interpolateButton, smoothButton));
 
             InputMap inputMap = content.getInputMap(JComponent.WHEN_ANCESTOR_OF_FOCUSED_COMPONENT);
             inputMap.put(KeyStroke.getKeyStroke(KeyEvent.VK_H, 0), "interpolateHorizontal");
@@ -516,22 +545,74 @@ public class TuningTableView {
             trailGraphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
             paintTrail(trailGraphics);
             trailGraphics.dispose();
-            // The marker sits on the value gradient, which looks the same in every theme, so it does too.
-            // Black-white-black rings stay visible on light and dark cells alike.
+            // The marker looks the same in every theme: black-white-black rings stay visible on the
+            // light cells of the light theme and the dark cells of the dark theme alike.
             g2.setColor(Color.BLACK); // [tag:fixed_color] live cell outline over the value gradient
             g2.drawRect(bounds.x, bounds.y, bounds.width - 1, bounds.height - 1);
             g2.drawRect(bounds.x + 2, bounds.y + 2, bounds.width - 5, bounds.height - 5);
-            g2.setColor(Color.WHITE); // [tag:fixed_color] middle ring and dot fill of the live marker
+            Color middleRing = Color.WHITE; // [tag:fixed_color] middle ring and dot core of the live marker
+            g2.setColor(middleRing);
             g2.drawRect(bounds.x + 1, bounds.y + 1, bounds.width - 3, bounds.height - 3);
             g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            // A hollow dot, with the value redrawn over it, so the number under the live point stays readable.
             Ellipse2D dot = new Ellipse2D.Double(x - LIVE_DOT_RADIUS, y - LIVE_DOT_RADIUS,
                 2 * LIVE_DOT_RADIUS, 2 * LIVE_DOT_RADIUS);
-            g2.fill(dot);
-            g2.setStroke(new BasicStroke(2f));
+            g2.setStroke(new BasicStroke(4f));
             g2.setColor(Color.BLACK); // [tag:fixed_color] live point dot outline over the value gradient
             g2.draw(dot);
+            g2.setStroke(new BasicStroke(2f));
+            g2.setColor(middleRing);
+            g2.draw(dot);
+            paintCellTextWithHalo(g2, cell.x, cell.y);
         } finally {
             g2.dispose();
+        }
+    }
+
+    /**
+     * Draws the cell's value again, where its renderer put it, with a one-pixel halo in the opposite
+     * text colour, so the live dot and trail under it do not hide the number.
+     */
+    private void paintCellTextWithHalo(Graphics2D g2, int row, int column) {
+        Component rendered = table.prepareRenderer(table.getCellRenderer(row, column), row, column);
+        if (!(rendered instanceof JLabel)) {
+            return;
+        }
+        JLabel label = (JLabel) rendered;
+        String text = label.getText();
+        if (text == null || text.isEmpty()) {
+            return;
+        }
+        Rectangle cell = table.getCellRect(row, column, false);
+        Insets insets = label.getInsets();
+        Rectangle view = new Rectangle(cell.x + insets.left, cell.y + insets.top,
+            cell.width - insets.left - insets.right, cell.height - insets.top - insets.bottom);
+        FontMetrics metrics = label.getFontMetrics(label.getFont());
+        Rectangle textBounds = new Rectangle();
+        String shown = SwingUtilities.layoutCompoundLabel(label, metrics, text, null,
+            label.getVerticalAlignment(), label.getHorizontalAlignment(),
+            label.getVerticalTextPosition(), label.getHorizontalTextPosition(),
+            view, new Rectangle(), textBounds, 0);
+        Graphics2D textGraphics = (Graphics2D) g2.create();
+        try {
+            Object desktopHints = Toolkit.getDefaultToolkit().getDesktopProperty("awt.font.desktophints");
+            if (desktopHints instanceof java.util.Map) {
+                textGraphics.addRenderingHints((java.util.Map<?, ?>) desktopHints);
+            }
+            textGraphics.setFont(label.getFont());
+            int baseline = textBounds.y + metrics.getAscent();
+            textGraphics.setColor(CalibrationColorPalette.foreground(label.getForeground()));
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dy = -1; dy <= 1; dy++) {
+                    if (dx != 0 || dy != 0) {
+                        textGraphics.drawString(shown, textBounds.x + dx, baseline + dy);
+                    }
+                }
+            }
+            textGraphics.setColor(label.getForeground());
+            textGraphics.drawString(shown, textBounds.x, baseline);
+        } finally {
+            textGraphics.dispose();
         }
     }
 
@@ -561,7 +642,10 @@ public class TuningTableView {
                 return;
             }
             orientationNode.setBoolProperty(key, option.isSelected());
-            displayTable(currentIni, currentTableName, imageTarget, axisImageTarget);
+            // Convert the current displayed targets back to source X/Y before applying the new orientation.
+            ConfigurationImage sourceX = flipAxes ? yAxisImageTarget : axisImageTarget;
+            ConfigurationImage sourceY = flipAxes ? axisImageTarget : yAxisImageTarget;
+            displayTable(currentIni, currentTableName, imageTarget, sourceX, sourceY);
             onOrientationChange.run();
         });
         menu.add(option);
@@ -625,9 +709,11 @@ public class TuningTableView {
         TableCellRenderer headerRenderer = table.getTableHeader().getDefaultRenderer();
         table.getTableHeader().setDefaultRenderer((source, value, selected, focused, row, column) -> {
             Component renderer = headerRenderer.getTableCellRendererComponent(source, value, selected, focused, row, column);
-            Color background = table.getTableHeader().getBackground();
+            Color background = CalibrationColorPalette.axisBackground();
             renderer.setBackground(isActiveValueCell() && column == activeColumn()
                 ? axisHighlight(background) : background);
+            renderer.setForeground(CalibrationColorPalette.axisForeground());
+            renderer.setFont(axisFont(table.getTableHeader().getFont()));
             UnburnedCellMark.apply(renderer, String.valueOf(value), burnedXAxisText(column), unburnedWording.get());
             return renderer;
         });
@@ -663,6 +749,58 @@ public class TuningTableView {
         mini3DView.setSelection(selection);
     }
 
+    /**
+     * Turns an INI {@code xyLabels} entry into display text, or null. Labels can be expressions that
+     * name the selected load source, e.g. {@code {bitStringValue(veAxisLabels, veLoadSrc)}}; their
+     * settings are read from whichever of the table's images holds that settings page.
+     */
+    private static Function<String, String> axisLabelResolver(IniFileModel ini, TableModel iniTable,
+                                                              ConfigurationImage zImage,
+                                                              ConfigurationImage xAxisImage,
+                                                              ConfigurationImage yAxisImage) {
+        Map<Integer, ConfigurationImage> imageByPage = new HashMap<>();
+        putPageImage(imageByPage, ini, iniTable.getXBinsConstant(), xAxisImage);
+        putPageImage(imageByPage, ini, iniTable.getYBinsConstant(), yAxisImage);
+        putPageImage(imageByPage, ini, iniTable.getZBinsConstant(), zImage);
+        Function<IniField, Double> settingValue = field -> {
+            ConfigurationImage image = imageByPage.get(field.getPageIndex());
+            boolean inside = image != null && field.getOffset() >= 0
+                && field.getOffset() + field.getSize() <= image.getSize();
+            return inside ? image.readNumericValue(field) : null;
+        };
+        ConfigurationImage mainPage = imageByPage.getOrDefault(0, zImage);
+        return label -> {
+            if (label == null || !TsStringFunction.containsStringFunction(label)) {
+                return plainLabel(label);
+            }
+            String resolved = TsStringFunction.resolveDisplayLabelWithVariables(label, ini, mainPage,
+                expression -> ExpressionEvaluator.resolveVariables(expression, ini, settingValue));
+            return plainLabel(resolved);
+        };
+    }
+
+    private static void putPageImage(Map<Integer, ConfigurationImage> imageByPage, IniFileModel ini,
+                                     String fieldName, ConfigurationImage image) {
+        if (fieldName == null || image == null) {
+            return;
+        }
+        ini.findIniField(fieldName).ifPresent(field -> imageByPage.putIfAbsent(field.getPageIndex(), image));
+    }
+
+    /**
+     * Corner header names, "row axis \ column axis", so tuners can tell which axis is which: the
+     * resolved INI label; without one, the axis output channel, then the bins constant.
+     */
+    private static String axisName(String text, String channel, String binsConstant) {
+        if (text != null) {
+            return text;
+        }
+        if (channel != null && !channel.trim().isEmpty()) {
+            return channel.trim();
+        }
+        return binsConstant == null ? "" : binsConstant;
+    }
+
     /** INI axis labels and units can be expressions; only plain text is shown. */
     private static String plainLabel(String label) {
         if (label == null) {
@@ -690,10 +828,19 @@ public class TuningTableView {
     }
 
     private Color axisHighlight(Color background) {
-        Color selection = table.getSelectionBackground();
-        return new Color((3 * background.getRed() + selection.getRed()) / 4,
-            (3 * background.getGreen() + selection.getGreen()) / 4,
-            (3 * background.getBlue() + selection.getBlue()) / 4);
+        return CalibrationColorPalette.mix(background, CalibrationColorPalette.selection(), 0.25);
+    }
+
+    private Font axisFontBase;
+    private Font axisFont;
+
+    /** Axis values are bold, so they read as headers rather than as table values. */
+    private Font axisFont(Font base) {
+        if (base != axisFontBase) {
+            axisFontBase = base;
+            axisFont = base == null ? null : base.deriveFont(Font.BOLD);
+        }
+        return axisFont;
     }
 
     private void installKeyboardEditing() {
@@ -758,6 +905,7 @@ public class TuningTableView {
             bindNumericEntry(digit);
         }
         bindNumericEntry('.');
+        bindNumericEntry(',');
         bindValueAdjustment('+', 1);
         bindValueAdjustment('-', -1);
         for (boolean backwards : new boolean[]{false, true}) {
@@ -858,14 +1006,15 @@ public class TuningTableView {
                 }
                 if (table.isEditing()) {
                     ((JTextField) table.getEditorComponent()).replaceSelection(Character.toString(character));
-                } else if (character == '.' && selectionInput.isEmpty()) {
+                } else if (DecimalInput.isSeparator(character) && selectionInput.isEmpty()) {
                     adjustSelectedValuesByPrecision(1);
                 } else if (table.getSelectedRowCount() * table.getSelectedColumnCount() > 1) {
-                    if (character == '.' && (selectionInput.contains(".")
+                    if (DecimalInput.isSeparator(character) && (selectionInput.contains(".")
                         || ((TuningTableModel) table.getModel()).precision == 0)) {
                         return;
                     }
-                    applySelectionInput(selectionInput + character);
+                    // the typed digits are kept with "." whichever separator was typed
+                    applySelectionInput(selectionInput + (DecimalInput.isSeparator(character) ? '.' : character));
                 } else if (startCellEdit(false)) {
                     ((JTextField) table.getEditorComponent()).setText(Character.toString(character));
                 }
@@ -901,7 +1050,7 @@ public class TuningTableView {
         }
         double value;
         try {
-            value = text.isEmpty() ? 0 : Double.parseDouble(text);
+            value = text.isEmpty() ? 0 : DecimalInput.parse(text);
         } catch (NumberFormatException e) {
             return;
         }
@@ -974,7 +1123,7 @@ public class TuningTableView {
 
     private boolean validateNumericEditor(JTextField field) {
         try {
-            if (Double.isFinite(Double.parseDouble(field.getText().trim()))) {
+            if (Double.isFinite(DecimalInput.parse(field.getText()))) {
                 return true;
             }
         } catch (NumberFormatException ignored) {
@@ -1290,7 +1439,7 @@ public class TuningTableView {
         int result = showConfirmDialog(panel);
         if (result == JOptionPane.OK_OPTION) {
             try {
-                double value = Double.parseDouble(valueField.getText());
+                double value = DecimalInput.parse(valueField.getText());
                 setValue(value, selectedRows, selectedCols);
             } catch (NumberFormatException ignored) {
             }
@@ -1335,7 +1484,8 @@ public class TuningTableView {
 
     private void setAxisValue(boolean xAxis, int index, Object value) {
         ArrayIniField field = xAxis ? xBinsField : yBinsField;
-        if (viewMode || field == null || axisImageTarget == null || value == null
+        ConfigurationImage target = xAxis ? axisImageTarget : yAxisImageTarget;
+        if (viewMode || field == null || target == null || value == null
             || !(table.getModel() instanceof TuningTableModel)) {
             return;
         }
@@ -1346,7 +1496,7 @@ public class TuningTableView {
         }
         double number;
         try {
-            number = Double.parseDouble(value.toString().trim());
+            number = DecimalInput.parse(value.toString());
         } catch (NumberFormatException e) {
             return;
         }
@@ -1358,14 +1508,14 @@ public class TuningTableView {
         int column = field.getRows() == 1 ? storedIndex : 0;
         // Encode only the edited element, then display the actual stored precision.
         int offset = field.getOffset(row, column);
-        ConfigurationImage candidate = axisImageTarget.clone();
+        ConfigurationImage candidate = target.clone();
         ConfigurationImage.setScalarValue(candidate.getByteBuffer(offset, field.getType().getStorageSize()),
             field.getType(), Double.toString(number), com.rusefi.config.Field.NO_BIT_OFFSET, field.getMultiplier(), 0);
         double encoded = ConfigurationImageGetterSetter.getArrayValues(field, candidate)[row][column];
         if (!Double.isFinite(encoded) || Double.compare(bins[index], encoded) == 0) {
             return;
         }
-        System.arraycopy(candidate.getContent(), offset, axisImageTarget.getContent(), offset,
+        System.arraycopy(candidate.getContent(), offset, target.getContent(), offset,
             field.getType().getStorageSize());
         bins[index] = encoded;
         if (xAxis) {
@@ -1418,7 +1568,7 @@ public class TuningTableView {
 
     private void applyDelta(JTextField deltaField, int sign) {
         try {
-            double delta = Double.parseDouble(deltaField.getText()) * sign;
+            double delta = DecimalInput.parse(deltaField.getText()) * sign;
             TuningTableModel model = (TuningTableModel) table.getModel();
             int[] selectedRows = table.getSelectedRows();
             int[] selectedCols = table.getSelectedColumns();
@@ -1647,6 +1797,11 @@ public class TuningTableView {
     }
 
     public void displayTable(IniFileModel iniFile, String tableName, ConfigurationImage zImage, ConfigurationImage axisImage) {
+        displayTable(iniFile, tableName, zImage, axisImage, axisImage);
+    }
+
+    void displayTable(IniFileModel iniFile, String tableName, ConfigurationImage zImage,
+                      ConfigurationImage xAxisImage, ConfigurationImage yAxisImage) {
         finishXAxisEdit(false);
         if (table.isEditing()) {
             table.getCellEditor().cancelCellEditing();
@@ -1668,9 +1823,8 @@ public class TuningTableView {
         // Extract data from outputs buffer using the field's offset
         Double[][] storedValues = ConfigurationImageGetterSetter.getArrayValues(ltft, zImage);
 
-        // X and Y bins (RPM and load) are on page 1
-        Double[] storedX = extractAxisBins(iniFile, iniTable.getXBinsConstant(), axisImage);
-        Double[] storedY = extractAxisBins(iniFile, iniTable.getYBinsConstant(), axisImage);
+        Double[] storedX = extractAxisBins(iniFile, iniTable.getXBinsConstant(), xAxisImage);
+        Double[] storedY = extractAxisBins(iniFile, iniTable.getYBinsConstant(), yAxisImage);
 
         currentIni = iniFile;
         currentTableName = tableName;
@@ -1688,22 +1842,29 @@ public class TuningTableView {
 
         this.imageTarget = zImage;
         this.zBinsField = ltft;
-        this.axisImageTarget = axisImage;
+        // Axis targets follow displayed axes after flip_xy, not the source X/Y names.
+        this.axisImageTarget = flipAxes ? yAxisImage : xAxisImage;
+        this.yAxisImageTarget = flipAxes ? xAxisImage : yAxisImage;
         this.xBinsField = editableAxisField(iniFile,
             flipAxes ? iniTable.getYBinsConstant() : iniTable.getXBinsConstant());
         this.yBinsField = editableAxisField(iniFile,
             flipAxes ? iniTable.getXBinsConstant() : iniTable.getYBinsConstant());
 
+        Function<String, String> labels = axisLabelResolver(iniFile, iniTable, zImage, xAxisImage, yAxisImage);
+        String storedXLabel = labels.apply(iniTable.getXLabel());
+        String storedYLabel = labels.apply(iniTable.getYLabel());
+        String storedXName = axisName(storedXLabel, iniTable.getXBinsChannel(), iniTable.getXBinsConstant());
+        String storedYName = axisName(storedYLabel, iniTable.getYBinsChannel(), iniTable.getYBinsConstant());
         TuningTableModel model = new TuningTableModel(dataValues, xBins, yBins, precision, !viewMode,
             edited -> commitEdit(edited, table.getSelectedRows(), table.getSelectedColumns()),
-            flipAxes ? "RPM \\ Load" : "Load \\ RPM");
-        if (!viewMode && axisImage != null && yBinsField != null) {
+            flipAxes ? storedXName + " \\ " + storedYName : storedYName + " \\ " + storedXName);
+        if (!viewMode && yAxisImageTarget != null && yBinsField != null) {
             model.onYAxisEdit = (index, value) -> setAxisValue(false, index, value);
         }
         model.xPrecision = xBinsField == null ? precision : IniField.parseDigits(xBinsField.getDigits());
         model.yPrecision = yBinsField == null ? precision : IniField.parseDigits(yBinsField.getDigits());
-        String xLabel = plainLabel(flipAxes ? iniTable.getYLabel() : iniTable.getXLabel());
-        String yLabel = plainLabel(flipAxes ? iniTable.getXLabel() : iniTable.getYLabel());
+        String xLabel = flipAxes ? storedYLabel : storedXLabel;
+        String yLabel = flipAxes ? storedXLabel : storedYLabel;
         String zLabel = plainLabel(ltft.getUnits());
         surface3DView.setAxisTitles(xLabel, yLabel, zLabel);
         mini3DView.setAxisTitles(xLabel, yLabel, zLabel);
@@ -1738,9 +1899,10 @@ public class TuningTableView {
     int unburnedCellCount() {
         ConfigurationImage burned = burnedImage.get();
         UnburnedChanges values = UnburnedChanges.of(imageTarget, burned);
-        UnburnedChanges axes = UnburnedChanges.of(axisImageTarget, burned);
-        return values.countChangedCells(zBinsField) + axes.countChangedCells(xBinsField)
-            + axes.countChangedCells(yBinsField);
+        UnburnedChanges xAxis = UnburnedChanges.of(axisImageTarget, burned);
+        UnburnedChanges yAxis = UnburnedChanges.of(yAxisImageTarget, burned);
+        return values.countChangedCells(zBinsField) + xAxis.countChangedCells(xBinsField)
+            + yAxis.countChangedCells(yBinsField);
     }
 
     /**
@@ -1819,7 +1981,7 @@ public class TuningTableView {
                 return null;
             }
             int[] cell = storedAxisCell(yBinsField, model.yBins.length, invertY, index);
-            if (!UnburnedChanges.of(axisImageTarget, burned).isCellChanged(yBinsField, cell[0], cell[1])) {
+            if (!UnburnedChanges.of(yAxisImageTarget, burned).isCellChanged(yBinsField, cell[0], cell[1])) {
                 return null;
             }
             return model.formatNumber(UnburnedCellMark.burnedValue(yBinsField, cell[0], cell[1], burned), model.yPrecision);
@@ -1921,12 +2083,19 @@ public class TuningTableView {
     private Double[] extractAxisBins(IniFileModel iniFile,
                                      String binConstant,
                                      ConfigurationImage image) {
+        if (image == null) {
+            return null;
+        }
         Optional<IniField> binsField = iniFile.findIniField(binConstant);
         if (!binsField.isPresent() || !(binsField.get() instanceof ArrayIniField)) {
             return null;
         }
 
         ArrayIniField field = (ArrayIniField) binsField.get();
+        if (!(field instanceof com.opensr5.ini.field.PcVariableArrayIniField)
+                && (image == null || field.getOffset() < 0 || field.getOffset() + field.getSize() > image.getSize())) {
+            return null;
+        }
         Double[][] values = ConfigurationImageGetterSetter.getArrayValues(field, image);
 
         if (values.length == 0 || values[0].length == 0) {
@@ -1996,7 +2165,7 @@ public class TuningTableView {
             }
             double number;
             try {
-                number = Double.parseDouble(value.toString().trim());
+                number = DecimalInput.parse(value.toString());
             } catch (NumberFormatException e) {
                 return;
             }
@@ -2044,8 +2213,12 @@ public class TuningTableView {
             return formatNumber(data[reversedRowIndex][columnIndex - 1]);
         }
 
+        /** A value cell: always the INI's digits, so the decimals line up down a column. */
         private String formatNumber(Object value) {
-            return formatNumber(value, precision);
+            if (value instanceof Number) {
+                return String.format(java.util.Locale.ROOT, "%." + precision + "f", ((Number) value).doubleValue());
+            }
+            return String.valueOf(value);
         }
 
         private String formatNumber(Object value, int digits) {
@@ -2073,34 +2246,36 @@ public class TuningTableView {
         private Component renderCell(JTable table, Object value, boolean isSelected, boolean hasFocus, int row, int column) {
             Component c = super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
             if (column == 0) {
-                c.setBackground(isActiveValueCell() && row == activeRow()
-                    ? axisHighlight(table.getBackground()) : table.getBackground());
-                c.setForeground(table.getForeground());
-                return c;
-            }
-            if (isSelected) {
-                c.setBackground(Color.ORANGE); // [tag:fixed_color] selected cell
-                c.setForeground(Color.BLACK); // [tag:fixed_color] text on the selected cell
+                Color background = CalibrationColorPalette.axisBackground();
+                c.setBackground(isActiveValueCell() && row == activeRow() ? axisHighlight(background) : background);
+                c.setForeground(CalibrationColorPalette.axisForeground());
+                c.setFont(axisFont(table.getFont()));
                 return c;
             }
 
-            if (value instanceof String) {
-                String strValue = (String) value;
-                if (!strValue.isEmpty()) {
-                    try {
-                        double val = Double.parseDouble(strValue);
-                        applyGradient(c, val);
-                    } catch (NumberFormatException ignored) {
-                    }
-                }
+            Color valueColor = valueColor(value);
+            Color background = valueColor != null ? valueColor : table.getBackground();
+            if (isSelected) {
+                // The value colour shows through the tint; the outline marks the block's edges.
+                background = CalibrationColorPalette.selected(background);
+                setBorder(BorderFactory.createCompoundBorder(CalibrationColorPalette.selectionEdges(table, row, column, 1), getBorder()));
             }
+            c.setBackground(background);
+            c.setForeground(valueColor != null || isSelected
+                ? CalibrationColorPalette.foreground(background) : table.getForeground());
             return c;
         }
 
-        private void applyGradient(Component c, double value) {
-            Color background = CalibrationColorPalette.background(value, minValue, maxValue);
-            c.setBackground(background);
-            c.setForeground(CalibrationColorPalette.foreground(background));
+        /** The value's place on the colour scale, or null for a cell that is not a number. */
+        private Color valueColor(Object value) {
+            if (value instanceof String && !((String) value).isEmpty()) {
+                try {
+                    return CalibrationColorPalette.background(Double.parseDouble((String) value), minValue, maxValue);
+                } catch (NumberFormatException ignored) {
+                }
+            }
+            return null;
         }
+
     }
 }

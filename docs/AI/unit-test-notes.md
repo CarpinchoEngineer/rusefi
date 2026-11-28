@@ -42,6 +42,11 @@ Exclusion patterns (e.g., for `googletest` or the `unit_tests` directory itself)
 
 The build system does not track compiler-flag changes, so run `make clean` in `unit_tests/` when switching between coverage and non-coverage builds — otherwise stale objects produce a near-zero (or needlessly instrumented) result.
 
+Linux CI keeps two `ccache` directories under `~/.cache/rusefi-ut`: `coverage`
+for the ASan/coverage build and `memcheck` for the unsanitized rebuild. Only
+compiler outputs are cached. A successful default-branch job saves the cache;
+PRs can restore the latest compatible archive and compile their own changes.
+
 Unit tests use Google Test and run on PC, not on the ECU.
 
 Fuel-pipeline fixtures used by custom boards must initialize `config->lambdaTable`
@@ -50,6 +55,11 @@ some custom boards 24 RPM bins, a `TEST_ENGINE` fixture otherwise divides by zer
 infinite fuel mass, which can silently satisfy floating-point equality checks.
 
 If a fresh unit-test build fails with `can't create build/obj/*.o: No such file or directory`, create `build/obj`, `build/lst`, and `.dep` under `unit_tests/`, then rerun `make -j12`. A partially created `build/` directory can satisfy the current directory prerequisite without its object subdirectory existing (observed during the MCP4728 work, 2026-09-27).
+
+Restoring tracked `page_N_generated.h` files after code generation can leave them
+inconsistent with other generated headers while `.config-sentinel` remains current.
+If a subsequent build fails a page-size static assertion, force configuration
+regeneration with `make -j12 -W ../firmware/integration/rusefi_config.txt`.
 
 When testing actuator init paths, remember that `EngineTestHelper` construction already runs `commonInitEngineController()` -> `initElectronicThrottle()`: with `TEST_ENGINE` (which defaults `etbFunctions[0]=DC_Wastegate`) DC hardware pool slot 0 is started *before* the test body runs, and the `DcHardware::isStarted` latch silently ignores any re-init with different settings. Call `resetDcHardwareForUnitTest()` / `resetIdleHardwareForUnitTest()` (both `EFI_UNIT_TEST` seams; also invoked by the `EngineTestHelper` constructor for cross-test isolation) before re-initializing with test-specific config. The idle stepper stack (`initIdleHardware()`, `StepDirectionStepper`, `DualHBridgeStepper`) compiles in unit tests; in that build `StepperMotor` is an alias of `StepperMotorBase` with no thread — tests drive it by calling `doIteration()` manually (see `test_idle_hardware.cpp`).
 
@@ -83,6 +93,11 @@ enables ASan. From `unit_tests/`, use `make clean`, `make -j12 SANITIZE=no`, the
 `./run_with_valgrind.sh`. `make_for_valgrind.sh` selects the flag but does not clean
 old objects, so running it alone after an ASan build can reuse incompatible objects.
 
+CI sets `RUSEFI_SKIP_REPLAY_LOGS=1` only for the Memcheck pass. Formatting diagnostic
+rows at 500 Hz dominates the Kawasaki 8-1, Nissan Maxima and Suzuki K6A cranking
+replays under instrumentation. The recordings still run in full. Leave the variable
+unset when reproducing a failure locally to get the usual MSL/CSV files.
+
 `EngineTestHelper::applyTriggerWaveform()` also increments the global configuration version and notifies hardware controllers. Static ETB controllers can retain PID pointers into an earlier test's destroyed configuration when the next test skips throttle initialization (for example, without TPS sensors). A later configuration notification then reads the stale pointer in `Pid::isSame()`, detectable under Valgrind. For tests that only need trigger/cylinder geometry refreshed, use `engine->updateTriggerConfiguration()` directly; tests of global configuration changes still require ETB lifetime isolation. See the MAP sampling tests and the 2026-09-29 report.
 
 Starter tests must explicitly clear `enginePins.starterControl` in setup and cleanup. `EngineTestHelper` resets injector/coil outputs and pin registrations, but an unassigned starter retains its logical output across tests; the next `doStartCranking()` then sees an already-engaged starter and skips new-engagement behavior.
@@ -95,6 +110,36 @@ See also unit_tests/test_results/readme.md for unit tests output.
 Parameterized names contain `/`; with test logging enabled, the missing parent
 directories make the logic-data writer dereference a null `FILE*` on teardown.
 Use explicitly named `TEST` cases sharing a helper when their traces are needed.
+
+#### Measuring trigger configuration cost
+
+After building, run `build/rusefi_test --gtest_also_run_disabled_tests
+--gtest_filter=TriggerConfigurationBenchmark.*` from `unit_tests/` (on one line).
+The opt-in benchmark uses `std::chrono::steady_clock`, not the mocked ECU clock,
+and reports microseconds per call for complete reconfiguration, waveform
+construction, sync discovery/validation, and output preparation with VVT disabled.
+It checks successful initialization but deliberately has no wall-clock threshold.
+The default host build uses `-O0` and sanitizers; its timings are not MCU estimates.
+
+`Engine::updateTriggerConfiguration()` logs and returns when the RPM sensor
+reports a positive value. At zero (or unavailable) RPM it performs these stages
+without a ChibiOS system lock. Geometry tests must configure the engine before
+setting a positive RPM, or explicitly stop, reconfigure, and restart.
+`TriggerConfiguration.UpdateWhileRunning` checks that rejected updates preserve
+both waveform and derived output geometry and that an explicit call at zero RPM
+applies the changes. Waveform construction calls
+`findAngleMatch()` for every appended edge, giving N(N-1)/2 approximate float
+comparisons for N edges, even though `addEvent()` requires increasing angles.
+Sync initialization runs the real decoder until synchronized and then feeds six
+additional waveform cycles through `assertSyncPosition()` in production as well
+as tests. Active VVT shapes each get their own initialization. The simulation
+advances synthetic timestamps without sleeping. Production additionally has
+logging, timer and optional perf-trace costs that the host does not reproduce;
+in particular, enabled sniffer/verbose sync logging can format gaps during the
+synthetic decoder run. Measure the same stages with a hardware cycle counter to
+attribute MCU latency. The RPM gate is a snapshot, not synchronization against
+new trigger edges arriving during initialization. Skipped updates are not queued
+for retry when the engine stops; see `docs/hardware-reinit-and-power-cycle.md`.
 
 #### Replaying `.teeth` (rusEFI tooth logger) captures in trigger tests
 

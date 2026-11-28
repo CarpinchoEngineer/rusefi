@@ -10,7 +10,7 @@ import com.opensr5.ini.TsStringFunction;
 import com.opensr5.ini.field.ArrayIniField;
 import com.opensr5.ini.field.IniField;
 import com.opensr5.ini.field.PcVariableArrayIniField;
-import com.rusefi.config.StringFormatter;
+import com.rusefi.ui.widgets.JoinedButtons;
 
 import javax.swing.*;
 import javax.swing.table.AbstractTableModel;
@@ -80,6 +80,10 @@ public class CurveWidget {
     private Supplier<ConfigurationImage> burnedImage = () -> null;
     private Supplier<UnburnedWording> unburnedWording = () -> UnburnedWording.BURNED;
     private final JLabel unburnedCountLabel = UnburnedCellMark.createCountLabel();
+    /** Plots the whole range the values may take, from the field limits, instead of the INI's suggested range. */
+    private final JToggleButton fitToLimitsButton = new JToggleButton("Fit to limits");
+    /** The row above the plot holding the toggle; hidden with it. */
+    private final JPanel toolbar = new JPanel();
 
     public CurveWidget(CurveModel curveModel, IniFileModel iniFileModel, ConfigurationImage ci) {
         this(curveModel, iniFileModel, ci, ci, false);
@@ -124,7 +128,21 @@ public class CurveWidget {
         // so it does not need (and must not get) a separate NORTH slot here.
         rightPanel.add(new JScrollPane(table), BorderLayout.CENTER);
         unburnedCountLabel.setBorder(BorderFactory.createEmptyBorder(4, 0, 0, 0));
-        rightPanel.add(unburnedCountLabel, BorderLayout.SOUTH);
+        // The count's line is reserved while it is hidden: the plot shares this row, and appearing on
+        // the first edit made the window grow the row and stretch the curve.
+        JPanel countLine = new JPanel(new BorderLayout()) {
+            @Override
+            public Dimension getPreferredSize() {
+                Dimension size = super.getPreferredSize();
+                Insets insets = unburnedCountLabel.getInsets();
+                size.height = Math.max(size.height, unburnedCountLabel.getFontMetrics(unburnedCountLabel.getFont()).getHeight()
+                    + insets.top + insets.bottom);
+                return size;
+            }
+        };
+        countLine.setOpaque(false);
+        countLine.add(unburnedCountLabel, BorderLayout.CENTER);
+        rightPanel.add(countLine, BorderLayout.SOUTH);
 
         content.setLayout(new GridBagLayout());
         GridBagConstraints gbc = new GridBagConstraints();
@@ -132,6 +150,7 @@ public class CurveWidget {
         gbc.weighty = 1.0;
 
         gbc.gridx = 0;
+        gbc.gridy = 1;
         gbc.weightx = 0.8;
         content.add(canvas, gbc);
 
@@ -140,7 +159,47 @@ public class CurveWidget {
         gbc.insets = new Insets(0, 8, 0, 0);
         content.add(rightPanel, gbc);
 
+        // Added last so the canvas stays the first component; laid out above the plot.
+        fitToLimitsButton.setToolTipText("Plot the whole range the values may take, not only the usual range");
+        fitToLimitsButton.addActionListener(e -> {
+            fitScale();
+            canvas.repaint();
+            table.repaint();
+        });
+        toolbar.setLayout(new FlowLayout(FlowLayout.LEFT, 0, 0));
+        toolbar.setOpaque(false);
+        toolbar.setBorder(BorderFactory.createEmptyBorder(0, 0, JoinedButtons.ROW_GAP, 0));
+        toolbar.add(new JoinedButtons(fitToLimitsButton));
+        gbc.gridx = 0;
+        gbc.gridy = 0;
+        gbc.gridwidth = 2;
+        gbc.weightx = 1;
+        gbc.weighty = 0;
+        gbc.insets = new Insets(0, 0, 0, 0);
+        content.add(toolbar, gbc);
+
         update(curveModel, iniFileModel, valuesImage, configImage);
+    }
+
+    JToggleButton getFitToLimitsButtonForTests() {
+        return fitToLimitsButton;
+    }
+
+    /**
+     * The scale when the curve opens or "Fit to limits" changes: the INI's suggested range, or the
+     * field limits where they are finite, widened to show every value.
+     */
+    private void fitScale() {
+        boolean limits = fitToLimitsButton.isSelected();
+        xAxis = fitAxis(limits ? limitsAxis(configuredXAxis, xMin, xMax) : configuredXAxis, xValues);
+        yAxis = fitAxis(limits ? limitsAxis(configuredYAxis, yMin, yMax) : configuredYAxis, yValues);
+    }
+
+    private static AxisModel limitsAxis(AxisModel configured, double min, double max) {
+        if (!Double.isFinite(min) || !Double.isFinite(max) || min >= max) {
+            return configured;
+        }
+        return new AxisModel(min, max, configured.getStep());
     }
 
     private void update(CurveModel curveModel, IniFileModel iniFile, ConfigurationImage valuesImage,
@@ -172,7 +231,10 @@ public class CurveWidget {
 
         this.xValues = readArray(curveModel.getxBins(), iniFile, valuesImage);
         this.yValues = readArray(curveModel.getyBins(), iniFile, valuesImage);
-        updatePlotAxes();
+        // Only where a field has both limits is there a whole range to show.
+        toolbar.setVisible(!readOnly && (Double.isFinite(yMin) && Double.isFinite(yMax) && yMin < yMax
+            || !xBinsFixed && Double.isFinite(xMin) && Double.isFinite(xMax) && xMin < xMax));
+        fitScale();
 
         canvas.setCurve(curveModel, xValues, yValues);
         table.setModel(new CurveTableModel());
@@ -218,7 +280,7 @@ public class CurveWidget {
         if (!UnburnedChanges.of(imageTarget, burned).isCellChanged(field, storedRow, storedColumn)) {
             return null;
         }
-        return StringFormatter.niceToString(UnburnedCellMark.burnedValue(field, storedRow, storedColumn, burned),
+        return formatValue(UnburnedCellMark.burnedValue(field, storedRow, storedColumn, burned),
             column == 0 ? xDigits : yDigits);
     }
 
@@ -270,9 +332,23 @@ public class CurveWidget {
         return value != null && Double.isFinite(value) ? value : fallback;
     }
 
+    /**
+     * After an edit the plot only grows, when a value leaves it: a scale that shrank or moved with
+     * every edit made the points that were not edited jump on screen. Opening the curve fits it tightly.
+     */
     private void updatePlotAxes() {
-        xAxis = fitAxis(configuredXAxis, xValues);
-        yAxis = fitAxis(configuredYAxis, yValues);
+        xAxis = growAxis(xAxis, configuredXAxis, xValues);
+        yAxis = growAxis(yAxis, configuredYAxis, yValues);
+    }
+
+    private static AxisModel growAxis(AxisModel current, AxisModel configured, Double[] values) {
+        for (Double value : values) {
+            if (value != null && Double.isFinite(value) && (value < current.getMin() || value > current.getMax())) {
+                // Refit around the values and everything shown now, with the INI's tick count.
+                return fitAxis(new AxisModel(current.getMin(), current.getMax(), configured.getStep()), values);
+            }
+        }
+        return current;
     }
 
     private static AxisModel fitAxis(AxisModel configured, Double[] values) {
@@ -345,6 +421,14 @@ public class CurveWidget {
         return t;
     }
 
+    /** A curve value with the INI's digits every time, like table values, so a column's decimals line up. */
+    static String formatValue(double value, int digits) {
+        if (digits <= 0) {
+            return Long.toString(Math.round(value));
+        }
+        return String.format(Locale.ROOT, "%." + digits + "f", value);
+    }
+
     private int parseDigits(String digits) {
         if (digits == null || digits.isEmpty()) {
             return 1;
@@ -389,6 +473,13 @@ public class CurveWidget {
         return content;
     }
 
+    static final Color LIVE_POINT_COLOR = Surface3DView.LIVE_POINT_COLOR;
+
+    /** Grid lines of the curve plot. */
+    public static Color gridColor() {
+        return TuningStyle.color("Console.Tuning.curve.grid", new Color(0xdfe3e9));
+    }
+
     public class CurveCanvas extends JPanel {
         private CurveModel curve;
         private Double[] x;
@@ -396,10 +487,11 @@ public class CurveWidget {
 
         private Integer draggingIndex = null;
         private boolean dragged = false;
+        /** Where the drag started, and from the mouse to the grabbed point's centre. */
+        private Point pressPoint;
+        private Point grabOffset;
 
         public CurveCanvas() {
-            // [tag:fixed_color] the curve plot is a black scope in every theme, with bright marks on it
-            setBackground(Color.BLACK);
             // An empty JPanel reports a near-zero preferred width, so GridBagLayout has no canvas baseline
             // to defend while shrinking and the plot collapses to a sliver on small windows (issue #9635).
             // A real preferred size lets the 0.8 weight keep the canvas usefully wide as the window resizes.
@@ -411,6 +503,13 @@ public class CurveWidget {
                 public void mousePressed(MouseEvent e) {
                     draggingIndex = readOnly ? null : findIndex(e.getPoint());
                     dragged = false;
+                    if (draggingIndex != null) {
+                        // The point moves by as much as the mouse does: snapping its centre to the
+                        // mouse changed its X on a straight vertical drag.
+                        pressPoint = e.getPoint();
+                        Point centre = worldToCanvas(x[draggingIndex], y[draggingIndex]);
+                        grabOffset = new Point(centre.x - pressPoint.x, centre.y - pressPoint.y);
+                    }
                 }
 
                 @Override
@@ -430,7 +529,7 @@ public class CurveWidget {
                 @Override
                 public void mouseDragged(MouseEvent e) {
                     if (draggingIndex != null) {
-                        updatePoint(draggingIndex, e.getPoint());
+                        updatePoint(draggingIndex, e.getPoint(), pressPoint, grabOffset);
                         dragged = true;
                         repaint();
                         table.repaint();
@@ -439,6 +538,20 @@ public class CurveWidget {
             };
             addMouseListener(mouseAdapter);
             addMouseMotionListener(mouseAdapter);
+        }
+
+        /** The plot follows the theme, on the same surface as the 3D table view [tag:console_theme]. */
+        @Override
+        public Color getBackground() {
+            return TuningStyle.color("Console.Tuning.surface.background", Color.WHITE);
+        }
+
+        private Color labelColor() {
+            return TuningStyle.color("Console.Tuning.curve.label", new Color(0x586273));
+        }
+
+        private Color lineColor() {
+            return TuningStyle.color("Console.Tuning.curve.line", new Color(0xc2410c));
         }
 
         public void setCurve(CurveModel curve, Double[] x, Double[] y) {
@@ -459,10 +572,19 @@ public class CurveWidget {
             return null;
         }
 
-        private void updatePoint(int index, Point p) {
-            Point2D world = canvasToWorld(p);
-            setXValue(index, world.x);
-            setYValue(index, world.y);
+        /**
+         * Moves a point by the drag; an axis the mouse has not moved along keeps its exact value. The point
+         * stays inside the plot: past its edge it left the screen and the scale grew on release. Values
+         * beyond the plot are typed in the table, or reached with "Fit to limits".
+         */
+        private void updatePoint(int index, Point mouse, Point press, Point offset) {
+            Point2D world = canvasToWorld(new Point(mouse.x + offset.x, mouse.y + offset.y));
+            if (mouse.x != press.x) {
+                setXValue(index, Math.max(xAxis.getMin(), Math.min(xAxis.getMax(), world.x)));
+            }
+            if (mouse.y != press.y) {
+                setYValue(index, Math.max(yAxis.getMin(), Math.min(yAxis.getMax(), world.y)));
+            }
         }
 
         @Override
@@ -483,11 +605,15 @@ public class CurveWidget {
                 plotGraphics.dispose();
             }
 
-            g2.setColor(Color.WHITE); // [tag:fixed_color] on the black scope
+            Font font = g2.getFont();
+            g2.setFont(font.deriveFont(Font.BOLD));
+            g2.setColor(TuningStyle.color("Console.Tuning.curve.title", Color.DARK_GRAY));
             String title = curveTitle;
             int titleWidth = g2.getFontMetrics().stringWidth(title);
             g2.drawString(title, (getWidth() - titleWidth) / 2, 15);
+            g2.setFont(font);
 
+            g2.setColor(labelColor());
             if (xUnits != null && !xUnits.isEmpty()) {
                 int unitsWidth = g2.getFontMetrics().stringWidth(xUnits);
                 g2.drawString(xUnits, (getWidth() - unitsWidth) / 2, getHeight() - 5);
@@ -503,8 +629,9 @@ public class CurveWidget {
         }
 
         public void drawGrid(Graphics2D g2) {
-            Color gridColor = new Color(200, 200, 200, 100); // light grey, semi-transparent // [tag:fixed_color] on the black scope
-            g2.setStroke(new BasicStroke(0.5f));
+            Color gridColor = gridColor();
+            Color labelColor = labelColor();
+            g2.setStroke(new BasicStroke(1f));
 
             FontMetrics fm = g2.getFontMetrics();
 
@@ -525,7 +652,7 @@ public class CurveWidget {
                 int labelWidth = fm.stringWidth(label);
                 int labelLeft = p1.x - labelWidth / 2;
                 if (labelLeft > lastXLabelRight) {
-                    g2.setColor(Color.RED); // [tag:fixed_color] on the black scope
+                    g2.setColor(labelColor);
                     g2.drawString(label, labelLeft, p1.y + fm.getAscent() + 2);
                     lastXLabelRight = labelLeft + labelWidth + 4; // 4px minimum gap between labels
                 }
@@ -540,7 +667,7 @@ public class CurveWidget {
                 g2.setColor(gridColor);
                 g2.drawLine(p1.x, p1.y, p2.x, p2.y);
 
-                g2.setColor(Color.RED); // [tag:fixed_color] on the black scope
+                g2.setColor(labelColor);
                 String label = String.format(Locale.ROOT, "%." + yDigits + "f", val);
                 int labelWidth = fm.stringWidth(label);
                 g2.drawString(label, p1.x - labelWidth - 5, p1.y + fm.getAscent() / 2);
@@ -551,22 +678,34 @@ public class CurveWidget {
         private void drawCurve(Graphics2D g2) {
             if (x == null || y == null || x.length == 0) return;
 
-            g2.setColor(Color.ORANGE); // [tag:fixed_color] on the black scope
+            Color line = lineColor();
+            Color background = getBackground();
+            Stroke stroke = g2.getStroke();
+            g2.setStroke(new BasicStroke(2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+            g2.setColor(line);
             for (int i = 0; i < x.length - 1; i++) {
                 Point p1 = worldToCanvas(x[i], y[i]);
                 Point p2 = worldToCanvas(x[i + 1], y[i + 1]);
                 g2.drawLine(p1.x, p1.y, p2.x, p2.y);
             }
 
-            g2.setColor(Color.GREEN); // [tag:fixed_color] on the black scope
+            // Points are hollow rings on the line, the handles to drag.
             for (int i = 0; i < x.length; i++) {
                 Point p = worldToCanvas(x[i], y[i]);
+                g2.setColor(background);
                 g2.fillOval(p.x - 4, p.y - 4, 8, 8);
+                g2.setColor(line);
+                g2.drawOval(p.x - 4, p.y - 4, 8, 8);
             }
+            g2.setStroke(stroke);
 
-            g2.setColor(Color.MAGENTA); // [tag:fixed_color] on the black scope
+            // Selected points in the selection colour, as in tables, ringed in the plot colour to stand off the line.
+            Color selection = CalibrationColorPalette.selection();
             for (int row : table.getSelectedRows()) {
                 Point p = worldToCanvas(x[row], y[row]);
+                g2.setColor(background);
+                g2.fillOval(p.x - 7, p.y - 7, 14, 14);
+                g2.setColor(selection);
                 g2.fillOval(p.x - 5, p.y - 5, 10, 10);
             }
             drawLivePoint(g2);
@@ -586,13 +725,16 @@ public class CurveWidget {
             Point p = worldToCanvas(liveX, liveY);
             Rectangle plot = getPlotBounds();
             Stroke stroke = g2.getStroke();
-            g2.setColor(Color.CYAN); // [tag:fixed_color] live point on the black scope
+            g2.setColor(labelColor());
             g2.setStroke(new BasicStroke(1f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10f, new float[]{4f, 4f}, 0f));
             g2.drawLine(p.x, plot.y, p.x, plot.y + plot.height);
-            g2.setStroke(stroke);
+            // The live point looks as in the 3D view: white ringed in black, visible in every theme.
+            g2.setStroke(new BasicStroke(2f));
+            g2.setColor(LIVE_POINT_COLOR);
             g2.fillOval(p.x - 6, p.y - 6, 12, 12);
-            g2.setColor(Color.WHITE); // [tag:fixed_color] live point outline on the black scope
+            g2.setColor(Color.BLACK); // [tag:fixed_color] live point outline, as in the 3D view
             g2.drawOval(p.x - 6, p.y - 6, 12, 12);
+            g2.setStroke(stroke);
         }
 
         private Rectangle getPlotBounds() {
@@ -654,7 +796,7 @@ public class CurveWidget {
         public Object getValueAt(int rowIndex, int columnIndex) {
             double val = columnIndex == 0 ? xValues[rowIndex] : yValues[rowIndex];
             int digits = columnIndex == 0 ? xDigits : yDigits;
-            return StringFormatter.niceToString(val, digits);
+            return formatValue(val, digits);
         }
 
         @Override
@@ -668,7 +810,7 @@ public class CurveWidget {
                 return;
             }
             try {
-                double val = Double.parseDouble(aValue.toString());
+                double val = DecimalInput.parse(aValue.toString());
                 if (!Double.isFinite(val)) {
                     return;
                 }
@@ -695,6 +837,11 @@ public class CurveWidget {
     }
 
     private class GradientRenderer extends DefaultTableCellRenderer {
+        GradientRenderer() {
+            // centred, like table values
+            setHorizontalAlignment(SwingConstants.CENTER);
+        }
+
         @Override
         public Component getTableCellRendererComponent(JTable table, Object value, boolean isSelected, boolean hasFocus, int row, int column) {
             Component c = renderCell(table, value, isSelected, hasFocus, row, column);
@@ -706,11 +853,9 @@ public class CurveWidget {
         private Component renderCell(JTable table, Object value, boolean isSelected, boolean hasFocus, int row, int column) {
             Component c = super.getTableCellRendererComponent(table, value, isSelected, hasFocus, row, column);
             if (row == liveRow()) {
-                // The row sits on the theme-independent value gradient, so the outline is fixed too.
+                // Black stays visible on the light and the dark value gradient alike.
                 setBorder(BorderFactory.createLineBorder(Color.BLACK, 2)); // [tag:fixed_color] live row outline
             }
-            if (isSelected) return c;
-
             double doubleValue;
             if (value instanceof Double) {
                 doubleValue = (Double) value;
@@ -730,14 +875,16 @@ public class CurveWidget {
                 min = yAxis.getMin();
                 max = yAxis.getMax();
             }
-            applyGradient(c, doubleValue, min, max);
-            return c;
-        }
-
-        private void applyGradient(Component c, double value, double minVal, double maxVal) {
-            Color background = CalibrationColorPalette.background(value, minVal, maxVal);
+            Color background = CalibrationColorPalette.background(doubleValue, min, max);
+            if (isSelected) {
+                // As in tables: the value colour under the selection tint, an outline around the block.
+                background = CalibrationColorPalette.selected(background);
+                setBorder(BorderFactory.createCompoundBorder(
+                    CalibrationColorPalette.selectionEdges(table, row, column, 0), getBorder()));
+            }
             c.setBackground(background);
             c.setForeground(CalibrationColorPalette.foreground(background));
+            return c;
         }
     }
 }

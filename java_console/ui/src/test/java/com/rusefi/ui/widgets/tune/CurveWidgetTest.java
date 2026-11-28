@@ -49,7 +49,7 @@ public class CurveWidgetTest {
                     assertEquals(masses[row], Double.valueOf(table.getValueAt(row, 1).toString()));
                     table.changeSelection(row, 1, false, false);
                     BufferedImage rendered = render(canvas);
-                    assertTrue(hasColor(rendered, Color.MAGENTA), "visible point " + row + " at " + size);
+                    assertTrue(hasColor(rendered, CalibrationColorPalette.selection()), "visible point " + row + " at " + size);
                     assertFalse(hasCurveOutsidePlot(rendered), "curve must stay inside the plot");
                 }
             }
@@ -189,7 +189,7 @@ public class CurveWidgetTest {
                 canvas.setSize(470, 360);
                 for (int row = 0; row < 2; row++) {
                     table.changeSelection(row, 1, false, false);
-                    assertTrue(hasColor(render(canvas), Color.MAGENTA));
+                    assertTrue(hasColor(render(canvas), CalibrationColorPalette.selection()));
                 }
                 edit(table, 0, 0, "-999");
                 assertEquals("-100", table.getValueAt(0, 0));
@@ -200,7 +200,7 @@ public class CurveWidgetTest {
                 edit(table, 1, 1, "1000");
                 assertEquals("1000", table.getValueAt(1, 1));
                 table.changeSelection(1, 1, false, false);
-                assertTrue(hasColor(render(canvas), Color.MAGENTA));
+                assertTrue(hasColor(render(canvas), CalibrationColorPalette.selection()));
                 AtomicInteger edits = new AtomicInteger();
                 widget.setOnEdit(edits::incrementAndGet);
                 for (String invalid : new String[]{"NaN", "Infinity", "-Infinity"}) {
@@ -237,14 +237,182 @@ public class CurveWidgetTest {
             canvas.dispatchEvent(new MouseEvent(canvas, MouseEvent.MOUSE_PRESSED, 0, 0, start.x, start.y, 1, false));
             for (int i = 0; i < 2; i++) {
                 canvas.dispatchEvent(new MouseEvent(canvas, MouseEvent.MOUSE_DRAGGED, 0, 0, end.x, end.y, 0, false));
-                assertEquals("1200", table.getValueAt(3, 1));
+                assertEquals("800", table.getValueAt(3, 1), "an off-plot drag stops at the plot's top");
                 assertEquals(end, canvas.worldToCanvas(20, 1200), "scale stays fixed during the gesture");
                 assertFalse(hasCurveOutsidePlot(render(canvas)), "off-plot drag must not paint over the title");
             }
             canvas.dispatchEvent(new MouseEvent(canvas, MouseEvent.MOUSE_RELEASED, 0, 0, end.x, end.y, 1, false));
-            assertEquals(1200.0, ConfigurationImageGetterSetter.getArrayValues(yField, image)[3][0]);
-            assertTrue(hasColor(render(canvas), Color.MAGENTA), "released point is visible after fitting the scale");
+            assertEquals(800.0, ConfigurationImageGetterSetter.getArrayValues(yField, image)[3][0]);
+            assertEquals(end, canvas.worldToCanvas(20, 1200), "the scale does not change on release");
+            assertTrue(hasColor(render(canvas), CalibrationColorPalette.selection()), "released point is visible");
         });
+    }
+
+    /** The priming curve: the first point (-40 C, 755 mg) is the tallest, so it sets the Y scale. */
+    private static ConfigurationImage primingImage(IniFileModel ini) {
+        ConfigurationImage image = ConfigurationImageTestHelper.newLittleEndian(24);
+        ConfigurationImageGetterSetter.setArrayValues((ArrayIniField) ini.findIniField("primeBins").get(), image,
+            new Double[]{-40.0, -20.0, 0.0, 20.0, 40.0, 60.0, 80.0, 100.0});
+        ConfigurationImageGetterSetter.setArrayValues((ArrayIniField) ini.findIniField("primeValues").get(), image,
+            new Double[]{755.0, 605.0, 265.0, 140.0, 75.0, 50.0, 45.0, 40.0});
+        return image;
+    }
+
+    private static void drag(JPanel canvas, Point from, Point to) {
+        canvas.dispatchEvent(new MouseEvent(canvas, MouseEvent.MOUSE_PRESSED, 0, 0, from.x, from.y, 1, false));
+        canvas.dispatchEvent(new MouseEvent(canvas, MouseEvent.MOUSE_DRAGGED, 0, 0, to.x, to.y, 0, false));
+        canvas.dispatchEvent(new MouseEvent(canvas, MouseEvent.MOUSE_RELEASED, 0, 0, to.x, to.y, 1, false));
+    }
+
+    @Test
+    public void grabbingAPointOffCentreAndDraggingStraightDownKeepsItsX() throws Throwable {
+        // The point moves by the drag, not to the mouse: a vertical drag that grabbed the point
+        // 4 px right of its centre keeps it at -40 C (it used to snap to -38 C).
+        IniFileModel ini = readPrimingIni();
+        ConfigurationImage image = primingImage(ini);
+        SwingUtilities.invokeAndWait(() -> {
+            CurveWidget widget = new CurveWidget(ini.getCurves().get("primingPulse"), ini, image);
+            CurveWidget.CurveCanvas canvas = (CurveWidget.CurveCanvas) widget.getContentPane().getComponent(0);
+            canvas.setSize(470, 360);
+            Point first = canvas.worldToCanvas(-40, 755);
+            drag(canvas, new Point(first.x + 4, first.y), new Point(first.x + 4, first.y + 30));
+            assertEquals(-40.0, ConfigurationImageGetterSetter.getArrayValues(
+                (ArrayIniField) ini.findIniField("primeBins").get(), image)[0][0]);
+        });
+    }
+
+    @Test
+    public void releasingADragOfTheTallestPointKeepsTheScale() throws Throwable {
+        // Lowering the tallest point used to refit the Y axis on release (0..800 -> 0..700), so points
+        // whose values did not change jumped on screen. The scale now only grows while editing.
+        IniFileModel ini = readPrimingIni();
+        ConfigurationImage image = primingImage(ini);
+        SwingUtilities.invokeAndWait(() -> {
+            CurveWidget widget = new CurveWidget(ini.getCurves().get("primingPulse"), ini, image);
+            CurveWidget.CurveCanvas canvas = (CurveWidget.CurveCanvas) widget.getContentPane().getComponent(0);
+            canvas.setSize(470, 360);
+            Point second = canvas.worldToCanvas(-20, 605);
+            Point first = canvas.worldToCanvas(-40, 755);
+            drag(canvas, first, new Point(first.x, first.y + 30));
+            assertEquals(605.0, ConfigurationImageGetterSetter.getArrayValues(
+                (ArrayIniField) ini.findIniField("primeValues").get(), image)[1][0], "the second point's value is unchanged");
+            assertEquals(second, canvas.worldToCanvas(-20, 605), "and it stays where it was drawn");
+        });
+    }
+
+    @Test
+    public void notBurnedCountAppearingKeepsTheCurveHeight() throws Throwable {
+        // The "1 cell not burned" line under the table is reserved while hidden: when it appeared on the
+        // first edit, the window grew the row it shares with the plot and the curve looked taller.
+        IniFileModel ini = readPrimingIni();
+        ConfigurationImage burned = primingImage(ini);
+        SwingUtilities.invokeAndWait(() -> {
+            CurveWidget widget = new CurveWidget(ini.getCurves().get("primingPulse"), ini, burned.clone());
+            widget.setBurnedImage(() -> burned);
+            int before = widget.getContentPane().getPreferredSize().height;
+            JTable table = findTable(widget.getContentPane());
+            edit(table, 1, 1, "500");
+            widget.refreshUnburnedMarks();
+            assertEquals("1 cell not burned", widget.getUnburnedCountLabelForTests().getText());
+            assertEquals(before, widget.getContentPane().getPreferredSize().height,
+                "the curve's panel asks for the same height once the label shows");
+        });
+    }
+
+    /** Like the IAT fuel multiplier: values may go 0..5, the INI plots 0..2. */
+    private static IniFileModel readRatioIni() throws Throwable {
+        String text = "[Constants]\npage = 1\n"
+            + "ratioBins = array, F32, 0, [4], \"C\", 1, 0, -40, 150, 0\n"
+            + "ratioValues = array, F32, 16, [4], \"ratio\", 1, 0, 0, 5, 2\n"
+            + "[CurveEditor]\ncurve = ratioCurve, \"Ratio\"\n"
+            + "columnLabel = \"Temperature\", \"Ratio\"\n"
+            + "xAxis = -40, 120, 9\nyAxis = 0, 2, 11\n"
+            + "xBins = ratioBins\nyBins = ratioValues\n";
+        IniFileMetaInfo meta = mock(IniFileMetaInfo.class);
+        when(meta.getnPages()).thenReturn(1);
+        when(meta.getPageSize(0)).thenReturn(32);
+        when(meta.getSignature()).thenReturn("test");
+        return IniFileReaderUtil.readIniFile(IniFileReaderUtil.read(
+            new ByteArrayInputStream(text.getBytes(StandardCharsets.US_ASCII))), "test", meta);
+    }
+
+    private static ConfigurationImage ratioImage(IniFileModel ini) {
+        ConfigurationImage image = ConfigurationImageTestHelper.newLittleEndian(32);
+        ConfigurationImageGetterSetter.setArrayValues((ArrayIniField) ini.findIniField("ratioBins").get(), image,
+            new Double[]{-40.0, 0.0, 40.0, 80.0});
+        ConfigurationImageGetterSetter.setArrayValues((ArrayIniField) ini.findIniField("ratioValues").get(), image,
+            new Double[]{1.0, 1.0, 1.0, 1.0});
+        return image;
+    }
+
+    @Test
+    public void draggingAPointAboveThePlotStopsAtItsEdge() throws Throwable {
+        // The point used to follow the mouse up to the field limit (5), out of the plot (0..2), and on
+        // release the scale grew, so the whole curve was drawn smaller. It now stops at the plot's top.
+        IniFileModel ini = readRatioIni();
+        ConfigurationImage image = ratioImage(ini);
+        SwingUtilities.invokeAndWait(() -> {
+            CurveWidget widget = new CurveWidget(ini.getCurves().get("ratioCurve"), ini, image);
+            CurveWidget.CurveCanvas canvas = (CurveWidget.CurveCanvas) widget.getContentPane().getComponent(0);
+            canvas.setSize(470, 360);
+            Point still = canvas.worldToCanvas(-40, 1.0);
+            Point second = canvas.worldToCanvas(0, 1.0);
+            drag(canvas, second, canvas.worldToCanvas(0, 3.0));
+            assertEquals(2.0, ConfigurationImageGetterSetter.getArrayValues(
+                (ArrayIniField) ini.findIniField("ratioValues").get(), image)[1][0], "the value stops at the plot's top");
+            assertEquals(still, canvas.worldToCanvas(-40, 1.0), "a point that did not change stays where it was drawn");
+        });
+    }
+
+    @Test
+    public void fitToLimitsPlotsTheWholeRangeSoADragReachesTheLimit() throws Throwable {
+        IniFileModel ini = readRatioIni();
+        ConfigurationImage image = ratioImage(ini);
+        ArrayIniField values = (ArrayIniField) ini.findIniField("ratioValues").get();
+        SwingUtilities.invokeAndWait(() -> {
+            CurveWidget widget = new CurveWidget(ini.getCurves().get("ratioCurve"), ini, image);
+            CurveWidget.CurveCanvas canvas = (CurveWidget.CurveCanvas) widget.getContentPane().getComponent(0);
+            canvas.setSize(470, 360);
+            JToggleButton fit = widget.getFitToLimitsButtonForTests();
+            assertTrue(fit.getParent().getParent().isVisible(), "the toggle shows for a field with limits");
+            assertFalse(fit.isSelected(), "curves open at the INI's suggested range");
+            Point top = canvas.worldToCanvas(0, 2);
+
+            fit.doClick();
+            assertTrue(canvas.worldToCanvas(0, 2).y > top.y, "2.0 is no longer the top of the plot");
+            drag(canvas, canvas.worldToCanvas(0, 1.0), canvas.worldToCanvas(0, 5.0));
+            assertEquals(5.0, ConfigurationImageGetterSetter.getArrayValues(values, image)[1][0], 0.05,
+                "a drag reaches the field's limit");
+
+            fit.doClick();
+            assertEquals(5.0, ConfigurationImageGetterSetter.getArrayValues(values, image)[1][0], 0.05,
+                "switching back keeps the values");
+            Point five = canvas.worldToCanvas(0, 5.0);
+            assertTrue(five.y >= 20, "the INI range widens to keep a value beyond it on the plot");
+        });
+    }
+
+    @Test
+    public void curveValuesAreCenteredLikeTableValues() throws Throwable {
+        IniFileModel ini = readPrimingIni();
+        ConfigurationImage image = primingImage(ini);
+        SwingUtilities.invokeAndWait(() -> {
+            JTable table = findTable(new CurveWidget(ini.getCurves().get("primingPulse"), ini, image).getContentPane());
+            for (int column = 0; column < 2; column++) {
+                JLabel cell = (JLabel) table.prepareRenderer(table.getCellRenderer(0, column), 0, column);
+                assertEquals(SwingConstants.CENTER, cell.getHorizontalAlignment(), "column " + column);
+            }
+        });
+    }
+
+    @Test
+    public void curveValuesKeepTheIniDigits() {
+        // Like table values: 1.00 beside 0.72, not 1.0 beside 0.72, and never scientific notation.
+        assertEquals("1.00", CurveWidget.formatValue(1.0, 2));
+        assertEquals("0.72", CurveWidget.formatValue(0.72, 2));
+        assertEquals("-40.0", CurveWidget.formatValue(-40, 1));
+        assertEquals("0.0001", CurveWidget.formatValue(0.0001, 4));
+        assertEquals("755", CurveWidget.formatValue(755.4, 0));
     }
 
     private static BufferedImage render(JPanel canvas) {
@@ -328,7 +496,7 @@ public class CurveWidgetTest {
             } finally {
                 graphics.dispose();
             }
-            assertEquals(Color.MAGENTA.getRGB(), rendered.getRGB(437, 245));
+            assertEquals(CalibrationColorPalette.selection().getRGB(), rendered.getRGB(437, 245));
 
             canvas.dispatchEvent(new MouseEvent(canvas, MouseEvent.MOUSE_PRESSED, 0, 0, 437, 245, 1, false));
             canvas.dispatchEvent(new MouseEvent(canvas, MouseEvent.MOUSE_DRAGGED, 0, 0, 450, 95, 0, false));
@@ -381,6 +549,52 @@ public class CurveWidgetTest {
         assertEquals(496.0, ExpressionEvaluator.evaluateNumericExpression("{ nestedLimit }", ini, image));
         assertNull(ExpressionEvaluator.evaluateNumericExpression("{ cyclicA }", ini, image));
         assertNull(ExpressionEvaluator.evaluateNumericExpression("{ unknownLimit }", ini, image));
+    }
+
+    /** Users with regional settings type a comma as the decimal separator. */
+    @Test
+    public void commaDecimalSeparator() throws Throwable {
+        String text = "[Constants]\npage = 1\n"
+            + "curveBins = array, F32, 0, [2], \"C\", 1, 0, 0, 100, 1\n"
+            + "curveValues = array, F32, 8, [2], \"%\", 1, 0, 0, 100, 1\n"
+            + "[CurveEditor]\ncurve = c, \"Curve\"\ncolumnLabel = \"X\", \"Y\"\n"
+            + "xAxis = 0, 100, 5\nyAxis = 0, 100, 5\nxBins = curveBins\nyBins = curveValues\n";
+        IniFileMetaInfo meta = mock(IniFileMetaInfo.class);
+        when(meta.getnPages()).thenReturn(1);
+        when(meta.getPageSize(0)).thenReturn(16);
+        when(meta.getSignature()).thenReturn("test");
+        IniFileModel ini = IniFileReaderUtil.readIniFile(IniFileReaderUtil.read(
+            new ByteArrayInputStream(text.getBytes(StandardCharsets.US_ASCII))), "test", meta);
+        ConfigurationImage image = ConfigurationImageTestHelper.newLittleEndian(16);
+        ArrayIniField xField = (ArrayIniField) ini.findIniField("curveBins").get();
+        ArrayIniField yField = (ArrayIniField) ini.findIniField("curveValues").get();
+        ConfigurationImageGetterSetter.setArrayValues(xField, image, new Double[]{10.0, 20.0});
+        ConfigurationImageGetterSetter.setArrayValues(yField, image, new Double[]{50.0, 60.0});
+
+        SwingUtilities.invokeAndWait(() -> {
+            JTable table = findTable(new CurveWidget(ini.getCurves().get("c"), ini, image).getContentPane());
+            edit(table, 0, 1, "52,5");
+            assertEquals(52.5, ConfigurationImageGetterSetter.getArrayValues(yField, image)[0][0], 0.001, "value");
+            edit(table, 1, 0, "25,5");
+            assertEquals(25.5, ConfigurationImageGetterSetter.getArrayValues(xField, image)[1][0], 0.001, "axis");
+        });
+    }
+
+    @Test
+    public void selectedCellsKeepTheirColourUnderTheTintAndGetOneOutline() throws Throwable {
+        IniFileModel ini = readIni();
+        ConfigurationImage image = ConfigurationImageTestHelper.newLittleEndian(20);
+        SwingUtilities.invokeAndWait(() -> {
+            JTable table = findTable(new CurveWidget(ini.getCurves().get("cltRevLimitCurve"), ini, image).getContentPane());
+            Color unselected = table.prepareRenderer(table.getCellRenderer(0, 1), 0, 1).getBackground();
+            table.changeSelection(0, 1, false, false);
+            table.changeSelection(1, 1, false, true);
+
+            JComponent first = (JComponent) table.prepareRenderer(table.getCellRenderer(0, 1), 0, 1);
+            assertEquals(CalibrationColorPalette.selected(unselected), first.getBackground());
+            javax.swing.border.Border outline = ((javax.swing.border.CompoundBorder) first.getBorder()).getOutsideBorder();
+            assertEquals(new Insets(2, 2, 0, 2), outline.getBorderInsets(first), "no line between the two selected cells");
+        });
     }
 
     private static void edit(JTable table, int row, int column, String value) {
