@@ -10,10 +10,10 @@ name: Firmware at GHA
 # statement three: on top of dollar cost, actions get queued meaning other collaborators have to wait
 # statement three: in case of bad commit/bad PR more than one annoying email is sent
 # in light of above we have three mechanisms to reduce github action runner consumption:
-# * 'only' syntax allow to build only specified configuration, for example 'only:uaefi' line in the commit message would only build 'uaefi' firmware configuration
+# * 'only' syntax selects a configuration from the push or PR head commit message, including on reruns (for example 'only:uaefi').
 # *        for random commits we can build zero firmware jobs if we do 'only:docs' or anything similar
 # * 'skip_rate' ratio in meta-info.env files allows to skip some builds with specific skip percentage
-# * Console UI, INI parser, console tests, Markdown docs, and firmware CI setup changes need only uaefi.
+# * Console UI/version, INI parser, console tests, Markdown docs, and firmware CI setup changes need only uaefi.
 #
 
 on:
@@ -151,8 +151,11 @@ jobs:
     steps:
     - uses: actions/checkout@v7
       with:
-        # Fetch both parents to check which files changed.
+        # Fetch both parents for changed files and the PR head commit message.
         fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 1 }}
+
+    - name: Test matrix selection
+      run: python3 firmware/bin/test_generate_matrix.py
 
     - name: Set matrix
       id: set-matrix

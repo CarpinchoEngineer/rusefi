@@ -81,8 +81,8 @@ class GenerateMatrixTest(unittest.TestCase):
 
     def test_ui_and_version(self):
         self.merge_pr([UI, VERSION])
-        # Characterizes #10740; intended coverage is only uaefi.
-        self.assertEqual({"uaefi", "other"}, self.targets())
+        # Regression for #10740: the console version bump needs only uaefi.
+        self.assertEqual({"uaefi"}, self.targets())
 
     def test_firmware_without_selector(self):
         self.merge_pr([FIRMWARE_CHANGE])
@@ -91,25 +91,25 @@ class GenerateMatrixTest(unittest.TestCase):
     def test_pr_head_commit_selector(self):
         self.merge_pr([FIRMWARE_CHANGE], "Test change only:uaefi")
         # PR events have no head_commit.message; the head commit must be read.
-        self.assertEqual({"uaefi", "other"}, self.targets())
+        self.assertEqual({"uaefi"}, self.targets())
 
     def test_selector_precedence(self):
         self.merge_pr([FIRMWARE_CHANGE], "Test change only:uaefi")
-        # Characterizes the PR-default condition overriding explicit selection.
-        self.assertEqual({"uaefi", "other"},
+        # The explicit selector takes precedence over the PR-default condition.
+        self.assertEqual({"uaefi"},
                          self.targets(COMMIT_MESSAGE="Test change only:uaefi"))
 
     def test_selector_on_rerun(self):
         self.merge_pr([FIRMWARE_CHANGE], "Test change only:uaefi")
-        self.assertEqual({"uaefi", "other"}, self.targets(RUN_ATTEMPT="2"))
+        self.assertEqual({"uaefi"}, self.targets(RUN_ATTEMPT="2"))
 
     def test_other_selector_with_ui(self):
         self.merge_pr([UI], "Test change only:other")
-        self.assertEqual({"uaefi"}, self.targets())
+        self.assertEqual({"other"}, self.targets())
 
     def test_unknown_selector(self):
         self.merge_pr([FIRMWARE_CHANGE], "Test change only:docs")
-        self.assertEqual({"uaefi", "other"}, self.targets())
+        self.assertEqual(set(), self.targets())
 
     def test_missing_pr_parent_metadata(self):
         self.merge_pr([UI])
