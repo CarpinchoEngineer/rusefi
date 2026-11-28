@@ -1,0 +1,74 @@
+name: Matrix guard smoke
+
+on:
+  push:
+    branches: ['sandbox/matrix-20261128/**']
+  pull_request:
+    branches: ['sandbox/matrix-20261128/**']
+
+permissions:
+  contents: read
+
+jobs:
+  generate-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        # Fetch both parents for changed files and the PR head commit message.
+        fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 1 }}
+
+    - name: Test matrix selection
+      run: python3 firmware/bin/test_generate_matrix.py
+
+    - name: Set matrix
+      id: set-matrix
+      working-directory: firmware
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        RUN_ATTEMPT: ${{ github.run_attempt }}
+        COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: |
+        MATRIX=$(bash bin/generate_matrix.sh config/boards)
+        printf 'matrix=%s\n' "$MATRIX" >> "$GITHUB_OUTPUT"
+
+    - name: Assert matrix only (no firmware builds)
+      env:
+        MATRIX: ${{ steps.set-matrix.outputs.matrix }}
+        EVENT: ${{ github.event_name }}
+        CASE_REF: ${{ github.head_ref || github.ref_name }}
+        ATTEMPT: ${{ github.run_attempt }}
+      run: |
+        python3 - <<'PY'
+        import json, os
+        from pathlib import Path
+        targets = sorted(item["build-target"] for item in json.loads(os.environ["MATRIX"])["include"])
+        ref = os.environ["CASE_REF"]
+        stage, case = ref.split("/")[-2:]
+        event = os.environ["EVENT"]
+        expected = None
+        if event == "pull_request" and stage == "characterization":
+            expected = ["uaefi"] if case == "ui-other-selector" else "broad"
+        elif case in ("firmware-selector", "ui-other-selector", "unknown-selector"):
+            expected = {"firmware-selector": ["uaefi"],
+                        "ui-other-selector": ["proteus_f4"],
+                        "unknown-selector": []}[case]
+        elif event == "pull_request" and case == "ui-version":
+            expected = ["uaefi"]
+        elif case in ("ui-version", "firmware-default"):
+            expected = "broad"
+        print(json.dumps(dict(ref=ref, event=event, attempt=os.environ["ATTEMPT"],
+                              count=len(targets), targets=targets, expected=expected)))
+        if expected == "broad":
+            assert len(targets) > 1, targets
+        elif expected is not None:
+            assert targets == expected, (targets, expected)
+        assert all("h7" not in name for name in targets), targets
+        with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as summary:
+            summary.write(f"### {case}: {event}\n\n{len(targets)} targets, attempt {os.environ['ATTEMPT']}\n\n")
+            summary.write("```json\n" + json.dumps(targets) + "\n```\n")
+        PY
